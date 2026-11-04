@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#15191d" />
+    <meta
+      name="description"
+      content="Локальная первичная проверка нормативных актов и поиск точных фрагментов для экспертного анализа."
+    />
+    <title>Норман — проверка нормативных актов</title>
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <div class="app-main">
+        <header class="app-bar" id="tabBar" hidden>
+          <div class="app-tab-list" id="tabList" role="tablist" aria-label="Документы"></div>
+          <button
+            class="new-analysis-button"
+            id="newDocument"
+            type="button"
+            aria-label="Новая вкладка"
+            title="Новый источник"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </button>
+        </header>
+
+        <button class="settings-button" id="openSettings" type="button" aria-label="Настройки" title="Настройки">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" />
+            <path d="m19.4 15 .1.1a2 2 0 1 1-2.8 2.8l-.1-.1a2 2 0 0 0-3.4 1.4v.2a2 2 0 1 1-4 0v-.2a2 2 0 0 0-3.4-1.4l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a2 2 0 0 0-1.4-3.4h-.2a2 2 0 1 1 0-4h.2a2 2 0 0 0 1.4-3.4l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a2 2 0 0 0 3.4-1.4v-.2a2 2 0 1 1 4 0v.2a2 2 0 0 0 3.4 1.4l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a2 2 0 0 0 1.4 3.4h.2a2 2 0 1 1 0 4h-.2a2 2 0 0 0-1.4 3.4Z" />
+          </svg>
+        </button>
+
+        <div class="error-banner global-error" id="errorBanner" role="alert" hidden>
+          <span id="errorText"></span>
+          <button class="text-button" id="dismissError" type="button">Скрыть</button>
+        </div>
+
+      <main class="start-screen" id="startScreen">
+        <div class="start-content">
+          <div class="start-intro">
+            <h1>Загрузить источник</h1>
+          </div>
+
+          <section class="load-bar" aria-label="Выберите способ загрузки">
+            <button class="button source-action" id="openUrlDialog" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13.5 8.5 15a4 4 0 0 1-5.7-5.7l4-4a4 4 0 0 1 5.7 0M14 10.5l1.5-1.5a4 4 0 0 1 5.7 5.7l-4 4a4 4 0 0 1-5.7 0M8.5 15.5l7-7" /></svg>
+              <span>По ссылке</span>
+            </button>
+            <button class="button source-action" id="openFileDialog" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3m0 0L7.5 7.5M12 3l4.5 4.5M4 14v6h16v-6" /></svg>
+              <span>Файл</span>
+            </button>
+          </section>
+          <p class="start-note">Инструмент предварительного анализа. Итоговое решение принимает человек.</p>
+
+          <div class="start-loading" id="startLoading" hidden aria-live="polite">
+            <span class="spinner" aria-hidden="true"></span>
+            <span>Открываем источник…</span>
+          </div>
+        </div>
+      </main>
+
+      <dialog class="modal" id="urlDialog" aria-labelledby="urlDialogTitle">
+        <form class="modal-card" id="urlForm">
+          <div class="modal-heading">
+            <h2 id="urlDialogTitle">Ссылка на документ</h2>
+            <button class="modal-close" id="closeUrlDialog" type="button" aria-label="Закрыть">×</button>
+          </div>
+          <label class="visually-hidden" for="urlInput">Публичная ссылка</label>
+          <input
+            class="modal-input"
+            id="urlInput"
+            name="url"
+            type="url"
+            inputmode="url"
+            autocomplete="url"
+            placeholder="https://…"
+            required
+          />
+          <p class="modal-error" id="urlError" role="alert" hidden></p>
+          <div class="modal-actions">
+            <button class="button button-secondary" id="cancelUrlDialog" type="button">Отмена</button>
+            <button class="button button-primary" id="urlSubmit" type="submit">Начать анализ</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog class="modal file-modal" id="fileDialog" aria-labelledby="fileDialogTitle">
+        <div class="modal-card">
+          <div class="modal-heading">
+            <h2 id="fileDialogTitle">Добавить документ</h2>
+            <button class="modal-close" id="closeFileDialog" type="button" aria-label="Закрыть">×</button>
+          </div>
+          <div class="file-dropzone" id="fileDropzone">
+            <svg viewBox="0 0 28 28" aria-hidden="true"><path d="M14 19V4m0 0L8.5 9.5M14 4l5.5 5.5M5 17v7h18v-7" /></svg>
+            <strong>Перетащите файл сюда</strong>
+            <span>или</span>
+            <button class="button button-secondary" id="openFilePicker" type="button">Выбрать файл</button>
+            <input class="visually-hidden" id="browserFileInput" type="file" accept=".doc,.docx,.docm,.dot,.dotx,.dotm,.odt,.pdf,.rtf,.txt,.text,.md,.csv" aria-hidden="true" tabindex="-1" />
+          </div>
+          <p class="modal-error" id="fileError" role="alert" hidden></p>
+        </div>
+      </dialog>
+
+      <dialog class="modal settings-modal" id="settingsDialog" aria-labelledby="settingsTitle">
+        <div class="modal-card">
+          <div class="modal-heading">
+            <h2 id="settingsTitle">Настройки</h2>
+            <button class="modal-close" id="closeSettings" type="button" aria-label="Закрыть">×</button>
+          </div>
+          <fieldset class="settings-theme">
+            <legend>Цветовая тема</legend>
+            <div class="settings-modal-options">
+              <label class="theme-choice">
+                <input type="radio" name="theme" value="dark" />
+                <span>Тёмная</span>
+              </label>
+              <label class="theme-choice">
+                <input type="radio" name="theme" value="light" />
+                <span>Светлая</span>
+              </label>
+            </div>
+          </fieldset>
+        </div>
+      </dialog>
+
+      <main class="analysis-screen" id="analysisScreen" hidden>
+        <div class="workspace">
+          <section class="document-pane" aria-label="Превью исходного документа">
+            <div class="reader-frame" id="readerFrame">
+              <section class="page-panel" id="pagePanel" hidden>
+                <div class="page-stage">
+                  <iframe
+                    id="pageFrame"
+                    title="Исходная страница"
+                    sandbox=""
+                    referrerpolicy="no-referrer"
+                    hidden
+                  ></iframe>
+                  <div class="page-loading page-overlay" id="pageLoading" role="status" hidden>
+                    <span class="spinner" aria-hidden="true"></span>
+                    <span>Открываем страницу…</span>
+                  </div>
+                  <div class="page-error page-overlay" id="pageError" role="alert" hidden>
+                    <h2>Сайт не разрешил показ во встроенном окне</h2>
+                    <p>Можно открыть исходную страницу в браузере.</p>
+                    <button class="button button-secondary" id="openOriginal" type="button" hidden>
+                      Открыть в браузере
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              <section class="text-panel" id="textPanel" aria-label="Текст предпросмотра" hidden>
+                <article class="document-content" id="documentContent">
+                  <div class="document-meta">
+                    <span class="format-tag" id="documentFormat"></span>
+                  </div>
+                  <h2 class="document-title" id="documentTitle"></h2>
+                  <div class="document-text" id="documentText" tabindex="0" aria-label="Текст документа"></div>
+                </article>
+              </section>
+            </div>
+          </section>
+
+          <aside class="findings-pane" aria-labelledby="findingsHeading">
+            <div class="panel-heading findings-heading">
+              <div>
+                <h2 id="findingsHeading">Сигналы для проверки</h2>
+              </div>
+              <div class="findings-heading-tools">
+                <span class="spinner analysis-spinner" id="analysisStatus" role="status" aria-label="Идёт анализ" aria-live="polite" hidden></span>
+                <span class="result-count" id="resultCount">—</span>
+              </div>
+            </div>
+
+            <div class="findings-content">
+              <p class="state-message" id="findingsMessage" aria-live="polite" aria-atomic="true">
+                Результаты появятся после загрузки источника.
+              </p>
+              <button class="button button-secondary retry-button" id="retryAnalysis" type="button" hidden>
+                Повторить проверку
+              </button>
+              <ol class="finding-list" id="findingList"></ol>
+              <section class="checklist-section" id="checklistSection" hidden>
+                <h3>Требует проверки по другим источникам</h3>
+                <ul class="checklist" id="checklist"></ul>
+              </section>
+            </div>
+          </aside>
+        </div>
+      </main>
+      </div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
