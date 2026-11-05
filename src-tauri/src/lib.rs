@@ -18,6 +18,8 @@ use tauri::Emitter;
 use thiserror::Error;
 use url::Url;
 
+mod codex;
+
 const MAX_FILE_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 15 * 1024 * 1024;
 const MAX_XML_BYTES: u64 = 12 * 1024 * 1024;
@@ -89,7 +91,7 @@ pub struct LoadedDocument {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Finding {
     pub id: String,
@@ -101,6 +103,12 @@ pub struct Finding {
     pub end: usize,
     pub reason: String,
     pub confidence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_confidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_rationale: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,7 +142,7 @@ struct RuleCatalog {
     rules: Vec<RuleDefinition>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct RuleDefinition {
     id: String,
     title: String,
@@ -204,7 +212,9 @@ pub fn run() {
             load_file,
             load_url,
             analyze_text,
-            get_rule_catalog
+            get_rule_catalog,
+            codex::get_codex_status,
+            codex::analyze_with_codex
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Норман");
@@ -1065,6 +1075,9 @@ fn analyze(
                         end,
                         reason: rule.definition.reason.clone(),
                         confidence: rule.definition.confidence.clone(),
+                        origin: None,
+                        ai_confidence: None,
+                        ai_rationale: None,
                     };
                     new_findings.push(finding);
                     if new_findings.len() >= MAX_FINDINGS_PER_RULE

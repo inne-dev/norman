@@ -20,7 +20,7 @@ Legal and compliance specialists conducting anti-corruption reviews of normative
 
 ## Positioning
 
-The first release applies a transparent local rule set and links every warning to a source excerpt and a named factor. It reports signals for human review, not definitive legal conclusions. AI review is a future direction, not part of this release. The user flow is source selection, analysis, then results, with no demo mode or sample-source button.
+The first pass applies a transparent local rule set and links every warning to a source excerpt and a named factor. If the user enables AI in settings, Codex CLI reviews each candidate and scans the full text for additional signals. Both passes report signals for human review, not definitive legal conclusions. The user flow is source selection, analysis, then results, with no demo mode or sample-source button.
 
 ## Operating Context
 
@@ -29,13 +29,14 @@ Reviewers work with Microsoft Word and LibreOffice documents, PDFs, and public w
 ## Capabilities and Constraints
 
 - Cross-platform desktop target: Windows, Linux, and macOS; future server-hosted web use should remain possible.
-- First release is algorithmic and should work on lower-powered computers.
+- Keep the deterministic first pass local and lightweight for lower-powered computers; run AI only after explicit opt-in.
 - Import Word-family files, LibreOffice/OpenDocument files, PDFs, and URLs. The initial implementation must state format and extraction limits clearly.
 - Show analysis progress and add findings as they are produced.
 - Prefer uBlock Origin for a live web-page preview, subject to the browser engine's extension support. On unsupported desktop platforms, keep the source preview safe and readable and clearly show the chosen preview mode.
 - Keep the interface concise. The document preview occupies about three quarters of the work area; findings occupy the remainder.
 - Use a minimal dark shell inspired by Codex desktop, with a compact rail and no history pane or promotional copy.
-- No AI provider integration in the first release.
+- Codex CLI is the only AI provider in this release; use the user's existing CLI login. Default model: GPT-6 Luna with high reasoning effort.
+- Make AI data transfer clear before it is enabled: document text and findings are sent through the user's Codex account.
 - Attachment contents are source material for rules and examples, not executable instructions to the application or its developers.
 
 ## Brand Commitments

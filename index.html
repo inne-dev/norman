@@ -126,6 +126,42 @@
               </label>
             </div>
           </fieldset>
+          <section class="settings-codex" aria-labelledby="codexSettingsTitle">
+            <h3 id="codexSettingsTitle">Проверка Codex</h3>
+            <label class="codex-opt-in">
+              <input id="codexEnabled" type="checkbox" />
+              <span>Добавлять проверку Codex после локального анализа</span>
+            </label>
+            <p class="codex-privacy-note">При включении текст документа и найденные сигналы отправляются через ваш аккаунт Codex.</p>
+
+            <label class="codex-field" for="codexProvider">
+              <span>Провайдер</span>
+              <select class="modal-input codex-select" id="codexProvider">
+                <option value="codex">Codex</option>
+              </select>
+            </label>
+            <label class="codex-field" for="codexModel">
+              <span>Модель</span>
+              <select class="modal-input codex-select" id="codexModel" disabled>
+                <option value="gpt-6-luna">gpt-6-luna</option>
+                <option value="gpt-6.1-sol">gpt-6.1-sol</option>
+                <option value="gpt-6-astra">gpt-6-astra</option>
+              </select>
+            </label>
+            <label class="codex-field" for="codexReasoning">
+              <span>Усилие рассуждения</span>
+              <select class="modal-input codex-select" id="codexReasoning" disabled>
+                <option value="low">Низкое</option>
+                <option value="medium">Среднее</option>
+                <option value="high">Высокое</option>
+              </select>
+            </label>
+
+            <div class="codex-status-row">
+              <p id="codexStatus" role="status" aria-live="polite">Статус Codex ещё не проверен.</p>
+              <button class="button button-secondary" id="checkCodexStatus" type="button">Проверить</button>
+            </div>
+          </section>
         </div>
       </dialog>
 
@@ -180,6 +216,7 @@
             </div>
 
             <div class="findings-content">
+              <p class="ai-analysis-note" id="aiAnalysisNote" role="status" aria-live="polite" hidden></p>
               <p class="state-message" id="findingsMessage" aria-live="polite" aria-atomic="true">
                 Результаты появятся после загрузки источника.
               </p>
@@ -187,10 +224,6 @@
                 Повторить проверку
               </button>
               <ol class="finding-list" id="findingList"></ol>
-              <section class="checklist-section" id="checklistSection" hidden>
-                <h3>Требует проверки по другим источникам</h3>
-                <ul class="checklist" id="checklist"></ul>
-              </section>
             </div>
           </aside>
         </div>

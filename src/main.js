@@ -7,6 +7,13 @@ import './style.css';
 
 const isTauri = Boolean(window.__TAURI_INTERNALS__);
 const THEME_STORAGE_KEY = 'norman-color-theme';
+const CODEX_STORAGE_KEY = 'norman-codex-settings';
+const DEFAULT_CODEX_SETTINGS = Object.freeze({
+  enabled: false,
+  provider: 'codex',
+  model: 'gpt-6-luna',
+  reasoningEffort: 'high',
+});
 
 const state = {
   screen: 'start',
@@ -14,10 +21,12 @@ const state = {
   activeId: null,
   document: null,
   findings: [],
-  checklist: [],
   selectedId: null,
   sourceLoading: false,
   analysis: 'idle',
+  aiAnalysis: 'idle',
+  aiAnalysisMessage: '',
+  aiProgress: null,
   progress: null,
   loadError: '',
   analysisError: '',
@@ -31,6 +40,8 @@ let analysisQueue = Promise.resolve();
 let sourceMarks = [];
 let followedFindingId = null;
 let sourceSyncFrame = 0;
+let codexStatus = { checked: false, installed: false, authenticated: false, version: '', message: '' };
+let codexStatusRequest = null;
 
 const ui = {
   tabBar: document.querySelector('#tabBar'),
@@ -60,6 +71,12 @@ const ui = {
   openSettings: document.querySelector('#openSettings'),
   settingsDialog: document.querySelector('#settingsDialog'),
   closeSettings: document.querySelector('#closeSettings'),
+  codexEnabled: document.querySelector('#codexEnabled'),
+  codexProvider: document.querySelector('#codexProvider'),
+  codexModel: document.querySelector('#codexModel'),
+  codexReasoning: document.querySelector('#codexReasoning'),
+  codexStatus: document.querySelector('#codexStatus'),
+  checkCodexStatus: document.querySelector('#checkCodexStatus'),
   openOriginal: document.querySelector('#openOriginal'),
   pagePanel: document.querySelector('#pagePanel'),
   textPanel: document.querySelector('#textPanel'),
@@ -72,11 +89,48 @@ const ui = {
   resultCount: document.querySelector('#resultCount'),
   analysisStatus: document.querySelector('#analysisStatus'),
   findingsMessage: document.querySelector('#findingsMessage'),
+  aiAnalysisNote: document.querySelector('#aiAnalysisNote'),
   retryAnalysis: document.querySelector('#retryAnalysis'),
   findingList: document.querySelector('#findingList'),
-  checklistSection: document.querySelector('#checklistSection'),
-  checklist: document.querySelector('#checklist'),
 };
+
+function loadCodexSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(CODEX_STORAGE_KEY) || '{}');
+    return {
+      ...DEFAULT_CODEX_SETTINGS,
+      ...saved,
+      enabled: saved.enabled === true,
+      provider: 'codex',
+      model: ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra'].includes(saved.model)
+        ? saved.model
+        : DEFAULT_CODEX_SETTINGS.model,
+      reasoningEffort: ['low', 'medium', 'high'].includes(saved.reasoningEffort)
+        ? saved.reasoningEffort
+        : DEFAULT_CODEX_SETTINGS.reasoningEffort,
+    };
+  } catch {
+    return { ...DEFAULT_CODEX_SETTINGS };
+  }
+}
+
+const codexSettings = loadCodexSettings();
+
+function saveCodexSettings() {
+  try {
+    localStorage.setItem(CODEX_STORAGE_KEY, JSON.stringify(codexSettings));
+  } catch {
+    // Settings still apply for this session when storage is unavailable.
+  }
+}
+
+function syncCodexSettingsUI() {
+  ui.codexEnabled.checked = codexSettings.enabled;
+  ui.codexProvider.value = codexSettings.provider;
+  ui.codexModel.value = codexSettings.model;
+  ui.codexReasoning.value = codexSettings.reasoningEffort;
+  renderCodexStatus();
+}
 
 let sourceTargets = new Map();
 
@@ -105,6 +159,7 @@ function setTheme(theme) {
 }
 
 setTheme(getSavedTheme());
+syncCodexSettingsUI();
 
 function setFollowedFinding(key, activeMark = null) {
   followedFindingId = key;
@@ -178,11 +233,13 @@ function saveActiveTab() {
   if (!tab) return;
   tab.document = state.document;
   tab.findings = state.findings;
-  tab.checklist = state.checklist;
   tab.selectedId = state.selectedId;
   tab.analysis = state.analysis;
   tab.analysisError = state.analysisError;
   tab.progress = state.progress;
+  tab.aiAnalysis = state.aiAnalysis;
+  tab.aiAnalysisMessage = state.aiAnalysisMessage;
+  tab.aiProgress = state.aiProgress;
 }
 
 function activateTab(tab) {
@@ -190,11 +247,13 @@ function activateTab(tab) {
   state.screen = 'analysis';
   state.document = tab.document;
   state.findings = tab.findings;
-  state.checklist = tab.checklist;
   state.selectedId = tab.selectedId;
   state.analysis = tab.analysis;
   state.analysisError = tab.analysisError;
   state.progress = tab.progress;
+  state.aiAnalysis = tab.aiAnalysis || 'idle';
+  state.aiAnalysisMessage = tab.aiAnalysisMessage || '';
+  state.aiProgress = tab.aiProgress || null;
   clearPageFrame();
   state.loadError = '';
 }
@@ -204,12 +263,14 @@ function createDocumentTab(document) {
     id: `document-${nextTabId++}`,
     document,
     findings: [],
-    checklist: [],
     selectedId: null,
     analysis: 'idle',
     analysisError: '',
     analysisToken: 0,
     progress: null,
+    aiAnalysis: 'idle',
+    aiAnalysisMessage: '',
+    aiProgress: null,
   };
 }
 
@@ -218,7 +279,6 @@ function showUploadScreen() {
   state.screen = 'start';
   state.document = null;
   state.findings = [];
-  state.checklist = [];
   state.selectedId = null;
   state.analysis = 'idle';
   state.analysisError = '';
@@ -332,18 +392,35 @@ function messageFrom(error) {
 }
 
 function findingKey(finding, index) {
-  return String(finding.id || finding.ruleId + '-' + finding.start + '-' + index);
+  return String(finding.id || `${finding.ruleId || finding.origin || 'finding'}-${finding.start ?? 'na'}-${finding.end ?? index}`);
+}
+
+function sameFinding(left, right) {
+  if (left.id && right.id && left.id === right.id) return true;
+  return Number.isInteger(left.start)
+    && Number.isInteger(left.end)
+    && Boolean(left.ruleId)
+    && left.start === right.start
+    && left.end === right.end
+    && String(left.ruleId || '') === String(right.ruleId || '');
+}
+
+function mergeFindings(existing, incoming) {
+  const merged = [...existing];
+  for (const finding of incoming) {
+    if (!finding || typeof finding !== 'object') continue;
+    const index = merged.findIndex((item) => sameFinding(item, finding));
+    if (index >= 0) merged[index] = { ...merged[index], ...finding };
+    else merged.push(finding);
+  }
+  merged.sort((left, right) => (left.start ?? Number.MAX_SAFE_INTEGER) - (right.start ?? Number.MAX_SAFE_INTEGER)
+    || (left.end ?? Number.MAX_SAFE_INTEGER) - (right.end ?? Number.MAX_SAFE_INTEGER)
+    || String(left.ruleId || '').localeCompare(String(right.ruleId || '')));
+  return merged;
 }
 
 function appendFindings(findings, target = state) {
-  const known = new Set(target.findings.map((finding) => finding.id));
-  for (const finding of findings) {
-    if (!known.has(finding.id)) {
-      known.add(finding.id);
-      target.findings.push(finding);
-    }
-  }
-  target.findings.sort((left, right) => left.start - right.start || left.end - right.end || left.ruleId.localeCompare(right.ruleId));
+  target.findings = mergeFindings(target.findings, findings);
 }
 
 function isValidFinding(finding) {
@@ -459,13 +536,16 @@ function renderDocument() {
   ui.documentTitle.textContent = doc.title || 'Документ без названия';
   ui.documentFormat.textContent = String(doc.format || 'ТЕКСТ').toUpperCase();
   const hasPage = Boolean(doc.url);
-  const selectedFinding = state.findings.find((finding, index) => findingKey(finding, index) === state.selectedId);
-  const showTextPreview = !hasPage || Boolean(selectedFinding && isValidFinding(selectedFinding));
-  ui.pagePanel.hidden = !hasPage || showTextPreview;
-  ui.textPanel.hidden = !showTextPreview;
-  if (hasPage && !showTextPreview) renderPageFrame(doc.url);
-  else if (!hasPage) clearPageFrame();
-  renderSourceText();
+  ui.pagePanel.hidden = !hasPage;
+  ui.textPanel.hidden = hasPage;
+  if (hasPage) {
+    sourceMarks = [];
+    sourceTargets.clear();
+    renderPageFrame(doc.url);
+  } else {
+    clearPageFrame();
+    renderSourceText();
+  }
 }
 
 function safeHttpUrl(value) {
@@ -522,6 +602,95 @@ function pluralFindings(count) {
   return count + ' сигналов';
 }
 
+function renderCodexStatus() {
+  const available = codexStatus.checked && codexPayloadIsAvailable(codexStatus) && !codexStatus.checking;
+  ui.codexModel.disabled = !available;
+  ui.codexReasoning.disabled = !available;
+  if (codexStatus.checking) {
+    ui.codexStatus.textContent = 'Проверяем доступность Codex…';
+    ui.codexStatus.dataset.state = 'loading';
+  } else if (!codexStatus.checked) {
+    ui.codexStatus.textContent = isTauri
+      ? 'Статус Codex ещё не проверен.'
+      : 'Проверка идёт через адаптер Vite.';
+    ui.codexStatus.dataset.state = 'idle';
+  } else if (codexStatus.error) {
+    ui.codexStatus.textContent = codexStatus.message || 'Не удалось проверить Codex.';
+    ui.codexStatus.dataset.state = 'error';
+  } else if (!codexStatus.installed) {
+    ui.codexStatus.textContent = codexStatus.message || 'Codex CLI не найден.';
+    ui.codexStatus.dataset.state = 'error';
+  } else if (!codexStatus.authenticated) {
+    ui.codexStatus.textContent = codexStatus.message || 'Войдите в Codex CLI.';
+    ui.codexStatus.dataset.state = 'error';
+  } else {
+    const version = codexStatus.version ? ` · ${codexStatus.version}` : '';
+    ui.codexStatus.textContent = codexStatus.message || `Codex подключён${version}.`;
+    ui.codexStatus.dataset.state = 'ready';
+  }
+  ui.checkCodexStatus.disabled = Boolean(codexStatus.checking);
+  ui.checkCodexStatus.textContent = codexStatus.checking ? 'Проверяем…' : 'Проверить';
+}
+
+async function refreshCodexStatus() {
+  if (codexStatusRequest) return codexStatusRequest;
+  codexStatus = { ...codexStatus, checking: true, error: false };
+  renderCodexStatus();
+  codexStatusRequest = (async () => {
+    try {
+      let result;
+      if (isTauri) {
+        result = await invoke('get_codex_status');
+      } else {
+        const response = await fetch('/__norman/codex/status', { headers: { Accept: 'application/json' } });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        result = await response.json();
+      }
+      codexStatus = {
+        checked: true,
+        installed: result?.installed === true,
+        authenticated: result?.authenticated === true,
+        version: String(result?.version || ''),
+        message: String(result?.message || ''),
+        checking: false,
+        error: false,
+      };
+    } catch (error) {
+      const detail = messageFrom(error);
+      codexStatus = {
+        checked: true,
+        installed: false,
+        authenticated: false,
+        version: '',
+        message: isTauri
+          ? 'Не удалось проверить Codex. Повторите проверку.'
+          : `Адаптер Codex недоступен в браузере разработки. Запустите приложение Норман или проверьте Vite-адаптер (${detail}).`,
+        checking: false,
+        error: true,
+      };
+    }
+    renderCodexStatus();
+    return codexStatus;
+  })().finally(() => {
+    codexStatusRequest = null;
+  });
+  return codexStatusRequest;
+}
+
+function renderAiAnalysisNote() {
+  let message = '';
+  if (state.aiAnalysis === 'checking') message = 'Проверяем доступность Codex…';
+  else if (state.aiAnalysis === 'running') {
+    const { phase, completed, total } = state.aiProgress || {};
+    const action = phase === 'verify' ? 'Проверяем локальные сигналы' : 'Ищем дополнительные сигналы';
+    message = Number.isFinite(completed) && Number.isFinite(total)
+      ? `Codex: ${action.toLocaleLowerCase('ru-RU')} · ${completed} / ${total}.`
+      : `Codex: ${action.toLocaleLowerCase('ru-RU')}…`;
+  } else if (state.aiAnalysis === 'error' || state.aiAnalysis === 'unavailable') message = state.aiAnalysisMessage;
+  ui.aiAnalysisNote.textContent = message;
+  ui.aiAnalysisNote.hidden = !message;
+}
+
 function renderFindingsMessage() {
   ui.retryAnalysis.hidden = state.analysis !== 'error';
 
@@ -546,19 +715,52 @@ function confidenceLevel(value) {
   return 'unknown';
 }
 
+function isAiFinding(finding) {
+  const origin = String(finding.origin || '').toLocaleLowerCase();
+  return origin === 'ai' || origin === 'codex' || finding.aiConfidence != null || finding.aiRationale != null;
+}
+
+function aiConfidenceLevel(value) {
+  const confidence = String(value || '').toLocaleLowerCase().replace(/[ _]+/gu, '-');
+  if (confidence === 'high' || confidence.includes('высок')) return 'high';
+  if (confidence === 'medium' || confidence.includes('средн')) return 'medium';
+  if (confidence === 'low' || confidence.includes('низк')) return 'low';
+  if (['likely-false', 'likely-false-positive', 'false', 'false-positive-likely', 'вероятно-ложный'].includes(confidence)) {
+    return 'likely-false';
+  }
+  return 'unknown';
+}
+
+function aiConfidenceLabel(value) {
+  return ({
+    high: 'высокая',
+    medium: 'средняя',
+    low: 'низкая',
+    'likely-false': 'вероятно ложный сигнал',
+    unknown: 'не указана',
+  })[aiConfidenceLevel(value)];
+}
+
 function createFindingRow(finding, index) {
   const key = findingKey(finding, index);
+  const aiFinding = isAiFinding(finding);
   const fullTitle = finding.title || finding.factor || 'Возможный сигнал';
   const shortTitle = fullTitle
     .replace(/^Возможн(?:ое|ая)\s+/u, '')
     .replace(/^./u, (character) => character.toLocaleUpperCase('ru-RU'));
   const item = document.createElement('li');
+  item.className = 'finding-card';
+  item.dataset.confidence = aiFinding ? aiConfidenceLevel(finding.aiConfidence) : confidenceLevel(finding.confidence);
   const button = document.createElement('button');
   button.type = 'button';
-  button.className = 'finding finding-summary';
+  button.className = 'finding-summary';
   button.dataset.findingId = key;
-  button.dataset.confidence = confidenceLevel(finding.confidence);
+  if (aiFinding) {
+    item.dataset.origin = String(finding.origin || (finding.aiConfidence != null ? 'algorithm' : 'codex')).toLocaleLowerCase();
+    item.dataset.aiConfidence = aiConfidenceLevel(finding.aiConfidence);
+  }
   const expanded = key === state.selectedId;
+  item.dataset.expanded = String(expanded);
   button.setAttribute('aria-expanded', String(expanded));
 
   const details = document.createElement('div');
@@ -567,9 +769,6 @@ function createFindingRow(finding, index) {
   details.hidden = !expanded;
   button.setAttribute('aria-controls', details.id);
 
-  const rule = document.createElement('span');
-  rule.className = 'rule-id';
-  rule.textContent = finding.ruleId || 'Правило';
   const location = document.createElement('span');
   location.className = 'finding-location';
   location.textContent = state.document && isValidFinding(finding)
@@ -577,7 +776,13 @@ function createFindingRow(finding, index) {
     : 'Источник';
   const meta = document.createElement('div');
   meta.className = 'finding-meta';
-  meta.append(rule, location);
+  meta.append(location);
+  if (aiFinding) {
+    const origin = document.createElement('span');
+    origin.className = 'finding-origin';
+    origin.textContent = 'Codex';
+    meta.append(origin);
+  }
 
   const title = document.createElement('strong');
   title.className = 'finding-title';
@@ -588,7 +793,8 @@ function createFindingRow(finding, index) {
   button.setAttribute('aria-label', [
     fullTitle,
     location.textContent,
-    finding.confidence ? 'Уверенность ' + finding.confidence : 'Уверенность не указана',
+    aiFinding ? `Уверенность Codex ${aiConfidenceLabel(finding.aiConfidence)}`
+      : finding.confidence ? 'Уверенность ' + finding.confidence : 'Уверенность не указана',
   ].join('. '));
   button.append(title, indicator);
 
@@ -596,13 +802,13 @@ function createFindingRow(finding, index) {
   factor.className = 'finding-factor';
   factor.textContent = finding.factor || '';
 
-  const excerpt = document.createElement('q');
+  const excerpt = document.createElement('blockquote');
   excerpt.className = 'finding-excerpt';
   excerpt.textContent = finding.excerpt || '';
 
   const reason = document.createElement('span');
   reason.className = 'finding-reason';
-  reason.textContent = finding.reason || 'Совпадение правила требует проверки в контексте.';
+  reason.textContent = (aiFinding && finding.aiRationale) || finding.reason || 'Совпадение правила требует проверки в контексте.';
 
   details.append(meta);
   if (finding.factor) details.append(factor);
@@ -612,41 +818,147 @@ function createFindingRow(finding, index) {
   return item;
 }
 
-function checklistText(item) {
-  if (typeof item === 'string') return { title: item, detail: '' };
-  if (!item || typeof item !== 'object') return { title: String(item), detail: '' };
-  const title = item.title || item.label || item.text || item.name || 'Проверка';
-  const detail = item.reason && item.reason !== title ? item.reason : item.status || '';
-  return { title: String(title), detail: String(detail) };
-}
-
-function renderChecklist() {
-  const items = Array.isArray(state.checklist) ? state.checklist : [];
-  ui.checklistSection.hidden = !items.length;
-  ui.checklist.replaceChildren();
-
-  for (const item of items) {
-    const parts = checklistText(item);
-    const row = document.createElement('li');
-    const title = document.createElement('span');
-    title.textContent = parts.title;
-    row.append(title);
-    if (parts.detail) {
-      const detail = document.createElement('small');
-      detail.textContent = parts.detail;
-      row.append(detail);
-    }
-    ui.checklist.append(row);
-  }
-}
-
 function renderFindings() {
   const count = state.findings.length;
   ui.resultCount.textContent = state.analysis === 'idle' && !state.document ? '—' : String(count);
   ui.findingList.replaceChildren(...state.findings.map(createFindingRow));
   renderFindingsMessage();
+  renderAiAnalysisNote();
   renderProgress();
-  renderChecklist();
+}
+
+function codexPayloadIsAvailable(status) {
+  return status?.installed === true && status?.authenticated === true;
+}
+
+function updateCodexProgress(tab, token, progress) {
+  if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
+  tab.aiProgress = progress || null;
+  reflectAnalysisTab(tab);
+}
+
+function updateCodexFinding(tab, token, finding) {
+  if (tabById(tab.id) !== tab || token !== tab.analysisToken || !finding) return;
+  appendFindings([finding], tab);
+  reflectAnalysisTab(tab);
+}
+
+async function analyzeCodexInBrowser(input, onProgress, onFinding) {
+  const response = await fetch('/__norman/codex/analyze', {
+    method: 'POST',
+    headers: {
+      Accept: 'application/x-ndjson',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(detail || `HTTP ${response.status}`);
+  }
+
+  let complete = null;
+  const handleLine = (line) => {
+    if (!line.trim()) return;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      throw new Error('Ответ адаптера Codex имеет неверный формат.');
+    }
+    if (event.type === 'progress') onProgress(event.payload || {});
+    else if (event.type === 'finding') onFinding(event.payload?.finding);
+    else if (event.type === 'complete') complete = event.payload || {};
+    else if (event.type === 'error') throw new Error(event.payload?.message || 'Проверка Codex не завершилась.');
+  };
+
+  if (response.body?.getReader) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      pending += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const lines = pending.split('\n');
+      pending = lines.pop() || '';
+      for (const line of lines) handleLine(line);
+      if (done) break;
+    }
+    if (pending.trim()) handleLine(pending);
+  } else {
+    const body = await response.text();
+    for (const line of body.split('\n')) handleLine(line);
+  }
+
+  if (!complete || !Array.isArray(complete.findings)) {
+    throw new Error('Адаптер Codex завершил поток без итогового списка сигналов.');
+  }
+  return complete;
+}
+
+async function executeCodexReview(tab, token) {
+  tab.aiAnalysis = 'checking';
+  tab.aiAnalysisMessage = '';
+  tab.aiProgress = null;
+  reflectAnalysisTab(tab);
+
+  const status = await refreshCodexStatus();
+  if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
+  if (!codexSettings.enabled) {
+    tab.aiAnalysis = 'idle';
+    tab.aiAnalysisMessage = '';
+    return;
+  }
+  if (!codexPayloadIsAvailable(status) || ui.codexModel.disabled || ui.codexReasoning.disabled) {
+    tab.aiAnalysis = 'unavailable';
+    tab.aiAnalysisMessage = status.message || (!status.installed
+      ? 'Codex CLI не найден. Локальные результаты сохранены.'
+      : 'Войдите в Codex CLI. Локальные результаты сохранены.');
+    return;
+  }
+
+  tab.aiAnalysis = 'running';
+  tab.aiAnalysisMessage = '';
+  tab.aiProgress = null;
+  reflectAnalysisTab(tab);
+
+  const onProgress = (progress) => updateCodexProgress(tab, token, progress);
+  const onFinding = (finding) => updateCodexFinding(tab, token, finding);
+  const unlisten = [];
+  try {
+    let result;
+    const input = {
+      text: tab.document.text,
+      findings: tab.findings,
+      model: codexSettings.model,
+      reasoningEffort: codexSettings.reasoningEffort,
+    };
+    if (isTauri) {
+      try {
+        unlisten.push(await listen('ai-analysis-progress', (event) => onProgress(event.payload || {})));
+        unlisten.push(await listen('ai-finding', (event) => onFinding(event.payload?.finding)));
+      } catch {
+        // Final invoke result still supplies all findings if event listening is unavailable.
+      }
+      result = await invoke('analyze_with_codex', input);
+    } else {
+      result = await analyzeCodexInBrowser(input, onProgress, onFinding);
+    }
+    if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
+    const resultFindings = Array.isArray(result) ? result : result?.findings;
+    if (!Array.isArray(resultFindings)) throw new Error('Codex не вернул итоговый список сигналов.');
+    tab.findings = mergeFindings(tab.findings, resultFindings);
+    tab.aiAnalysis = 'done';
+    tab.aiProgress = null;
+    tab.aiAnalysisMessage = '';
+  } catch (error) {
+    if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
+    tab.aiAnalysis = 'error';
+    tab.aiProgress = null;
+    tab.aiAnalysisMessage = `Проверка Codex не завершилась. Локальные результаты сохранены. ${messageFrom(error)}`;
+  } finally {
+    for (const stop of unlisten) stop();
+  }
 }
 
 function render() {
@@ -686,8 +998,8 @@ async function executeAnalysis(tab, token) {
         reflectAnalysisTab(tab);
       });
     if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
-    tab.findings = Array.isArray(result?.findings) ? result.findings : [];
-    tab.checklist = Array.isArray(result?.checklist) ? result.checklist : [];
+    tab.findings = mergeFindings(tab.findings, Array.isArray(result?.findings) ? result.findings : []);
+    if (codexSettings.enabled) await executeCodexReview(tab, token);
     tab.analysis = 'done';
     tab.progress = null;
   } catch (error) {
@@ -708,9 +1020,11 @@ function reflectAnalysisTab(tab) {
   state.analysis = tab.analysis;
   state.analysisError = tab.analysisError;
   state.findings = tab.findings;
-  state.checklist = tab.checklist;
   state.selectedId = tab.selectedId;
   state.progress = tab.progress;
+  state.aiAnalysis = tab.aiAnalysis || 'idle';
+  state.aiAnalysisMessage = tab.aiAnalysisMessage || '';
+  state.aiProgress = tab.aiProgress || null;
   render();
 }
 
@@ -722,9 +1036,11 @@ function runAnalysis(tabId = state.activeId) {
   tab.analysis = 'running';
   tab.analysisError = '';
   tab.findings = [];
-  tab.checklist = [];
   tab.selectedId = null;
   tab.progress = null;
+  tab.aiAnalysis = 'idle';
+  tab.aiAnalysisMessage = '';
+  tab.aiProgress = null;
   reflectAnalysisTab(tab);
 
   const job = analysisQueue.then(
@@ -919,13 +1235,24 @@ if (isTauri) {
 }
 
 ui.newDocument.addEventListener('click', startNewTab);
-ui.openSettings.addEventListener('click', () => ui.settingsDialog.showModal());
+ui.openSettings.addEventListener('click', () => {
+  syncCodexSettingsUI();
+  ui.settingsDialog.showModal();
+  void refreshCodexStatus();
+});
 ui.closeSettings.addEventListener('click', () => ui.settingsDialog.close());
+ui.checkCodexStatus.addEventListener('click', () => void refreshCodexStatus());
 ui.settingsDialog.addEventListener('click', (event) => {
   if (event.target === ui.settingsDialog) ui.settingsDialog.close();
 });
 ui.settingsDialog.addEventListener('change', (event) => {
   if (event.target.matches('input[name="theme"]')) setTheme(event.target.value);
+  if (event.target === ui.codexEnabled) codexSettings.enabled = ui.codexEnabled.checked;
+  if (event.target === ui.codexModel) codexSettings.model = ui.codexModel.value;
+  if (event.target === ui.codexReasoning) codexSettings.reasoningEffort = ui.codexReasoning.value;
+  if (event.target === ui.codexEnabled || event.target === ui.codexModel || event.target === ui.codexReasoning) {
+    saveCodexSettings();
+  }
 });
 
 ui.tabList.addEventListener('click', (event) => {

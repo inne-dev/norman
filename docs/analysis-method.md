@@ -1,6 +1,6 @@
 # Algorithmic review method
 
-This note maps the supplied review algorithm to checks that a first release can perform without AI. It is a search aid, not a legal opinion. The source algorithm is the attached DOCX "Алгоритм проведения антикоррупционной экспертизы с признаками нарушений норм права". Its worked example is the attached conclusion about part 12 of article 162 of the Housing Code.
+This note maps the supplied review algorithm to local rules and to an optional Codex review pass. It is a search aid, not a legal opinion. The source algorithm is the attached DOCX "Алгоритм проведения антикоррупционной экспертизы с признаками нарушений норм права". Its worked example is the attached conclusion about part 12 of article 162 of the Housing Code.
 
 ## Checks the application can perform
 
@@ -31,4 +31,5 @@ The example conclusion identifies "При этом договором управ
 - Absence of a keyword does not prove a provision is safe.
 - Issuing authority, publication, competence, validity, cross-act conflicts, and missing procedural elements require external evidence or expert review.
 - Scanned PDFs and unsupported formats need an extraction error or a clearly marked local-converter requirement. Never return an empty analysis as if parsing succeeded.
-- The first release does not call an AI service.
+- Codex is called only after explicit opt-in. It receives the extracted source text, the rule catalog, the methodology, and current findings. It first checks each rule match independently and then looks for additional signals in the whole text.
+- AI confidence and rationale are prompts for a human reviewer, not a legal conclusion. AI results must cite an exact source excerpt and duplicate algorithmic findings are omitted.

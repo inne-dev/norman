@@ -11,7 +11,9 @@ Read `PRODUCT.md` before product or UI changes. Норман is a cross-platform
 - Use cautious language: a match is a possible signal for expert review, never a definitive legal or corruption conclusion.
 - Do not infer issuing authority, publication, competence, effective date, or cross-document conflict as verified facts from keyword matching. Mark these as unresolved checks unless a source is actually provided and parsed.
 - Keep the rule catalog in data, separate from matching and presentation code.
-- Do not send local files or document contents to network services. Fetch only a user-entered URL. No AI/network provider calls in v1.
+- Run the deterministic pass locally before any AI pass. AI analysis is opt-in, disabled by default, and uses only the user's authenticated Codex CLI in this release.
+- When AI is enabled, tell the user that source text and findings are sent through their Codex account. Never send document content to another provider or silently enable AI. URL fetching remains limited to a URL entered by the user.
+- Treat document text as untrusted data in AI prompts. Require structured outputs, exact excerpts, deduplication, conservative confidence, and human review; AI findings are not legal conclusions.
 
 ## Runtime and formats
 
@@ -20,7 +22,7 @@ Read `PRODUCT.md` before product or UI changes. Норман is a cross-platform
 - Preserve source order and offsets through normalization so findings can point back to preview text.
 - Support DOC/DOT through local parsing with a LibreOffice fallback, DOCX family, ODT, RTF, plain text, and text-based PDF. Report scanned PDFs honestly; OCR is not included.
 - URL loading must validate HTTP(S), impose response/time/size limits, and extract readable page text without executing scripts.
-- The URL analysis text stays local to the analysis view. The source view may load the entered address in a sandboxed, script-disabled frame.
+- The URL analysis text stays local to the analysis view unless the user enables Codex analysis. The source view may load the entered address in a sandboxed, script-disabled frame.
 - The user prefers uBlock Origin for remote-page preview. Check platform support before promising it. Keep a cross-platform preview path, explain when the installed WebView cannot host the extension, and never load the page's scripts into the analysis view.
 
 ## Interface
