@@ -21,8 +21,8 @@ Read `PRODUCT.md` before product or UI changes. Норман is a cross-platform
 - Support clear errors for unsupported, encrypted, scanned, malformed, or over-limit files. Never silently return an empty successful analysis.
 - Preserve source order and offsets through normalization so findings can point back to preview text.
 - Support DOC/DOT through local parsing with a LibreOffice fallback, DOCX family, ODT, RTF, plain text, and text-based PDF. Report scanned PDFs honestly; OCR is not included.
-- URL loading must validate HTTP(S), impose response/time/size limits, and extract readable page text without executing scripts.
-- The URL analysis text stays local to the analysis view unless the user enables Codex analysis. The source view may load the entered address in a sandboxed, script-disabled frame.
+- URL loading must validate HTTP(S), impose response/time/size limits, and extract readable page text without executing scripts. Keep the fetched HTML snapshot for the source preview so the page is not fetched twice.
+- The URL analysis text stays local to the analysis view unless the user enables Codex analysis. Show the fetched source snapshot in a sandboxed, script-disabled frame and highlight matched excerpts there; never show extracted text as the user's URL preview.
 - The user prefers uBlock Origin for remote-page preview. Check platform support before promising it. Keep a cross-platform preview path, explain when the installed WebView cannot host the extension, and never load the page's scripts into the analysis view.
 
 ## Interface

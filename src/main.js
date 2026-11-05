@@ -13,6 +13,8 @@ const DEFAULT_CODEX_SETTINGS = Object.freeze({
   provider: 'codex',
   model: 'gpt-6-luna',
   reasoningEffort: 'high',
+  filterAdsInPreview: true,
+  parallelProcesses: 1,
 });
 
 const state = {
@@ -40,8 +42,18 @@ let analysisQueue = Promise.resolve();
 let sourceMarks = [];
 let followedFindingId = null;
 let sourceSyncFrame = 0;
+let pageFrameSoftTimeout = 0;
+let rejectedFindingsSection = null;
+let rejectedFindingsList = null;
+let rejectedFindingsCount = null;
+let renderedFindingsOrderSignature = '';
 let codexStatus = { checked: false, installed: false, authenticated: false, version: '', message: '' };
 let codexStatusRequest = null;
+let pageFrameDocumentRef = null;
+let pageFrameBoundDocument = null;
+let pageFrameLoadToken = 0;
+let pageFrameFilterAds = null;
+const findingDetailsAnimations = new WeakMap();
 
 const ui = {
   tabBar: document.querySelector('#tabBar'),
@@ -71,13 +83,35 @@ const ui = {
   openSettings: document.querySelector('#openSettings'),
   settingsDialog: document.querySelector('#settingsDialog'),
   closeSettings: document.querySelector('#closeSettings'),
+  aiReviewDialog: document.querySelector('#aiReviewDialog'),
+  closeAiReview: document.querySelector('#closeAiReview'),
+  aiReviewMode: document.querySelector('#aiReviewMode'),
+  aiReviewSourceName: document.querySelector('#aiReviewSourceName'),
+  aiReviewRule: document.querySelector('#aiReviewRule'),
+  aiReviewFactor: document.querySelector('#aiReviewFactor'),
+  aiReviewRuleReason: document.querySelector('#aiReviewRuleReason'),
+  aiReviewExcerpt: document.querySelector('#aiReviewExcerpt'),
+  aiReviewContextLabel: document.querySelector('#aiReviewContextLabel'),
+  aiReviewContext: document.querySelector('#aiReviewContext'),
+  aiReviewDocumentDetails: document.querySelector('#aiReviewDocumentDetails'),
+  aiReviewDocumentSummary: document.querySelector('#aiReviewDocumentSummary'),
+  aiReviewDocumentText: document.querySelector('#aiReviewDocumentText'),
+  aiReviewRationale: document.querySelector('#aiReviewRationale'),
+  aiReviewResult: document.querySelector('#aiReviewResult'),
+  aiReviewConfidenceMark: document.querySelector('#aiReviewConfidenceMark'),
+  aiReviewConfidence: document.querySelector('#aiReviewConfidence'),
+  aiReviewDecision: document.querySelector('#aiReviewDecision'),
   codexEnabled: document.querySelector('#codexEnabled'),
+  filterAdsInPreview: document.querySelector('#filterAdsInPreview'),
+  codexOptions: document.querySelector('#codexOptions'),
   codexProvider: document.querySelector('#codexProvider'),
   codexModel: document.querySelector('#codexModel'),
   codexReasoning: document.querySelector('#codexReasoning'),
+  parallelProcesses: document.querySelector('#parallelProcesses'),
   codexStatus: document.querySelector('#codexStatus'),
   checkCodexStatus: document.querySelector('#checkCodexStatus'),
   openOriginal: document.querySelector('#openOriginal'),
+  readerFrame: document.querySelector('#readerFrame'),
   pagePanel: document.querySelector('#pagePanel'),
   textPanel: document.querySelector('#textPanel'),
   pageFrame: document.querySelector('#pageFrame'),
@@ -88,8 +122,13 @@ const ui = {
   documentText: document.querySelector('#documentText'),
   resultCount: document.querySelector('#resultCount'),
   analysisStatus: document.querySelector('#analysisStatus'),
+  analysisProgress: document.querySelector('#analysisProgress'),
+  analysisProgressBar: document.querySelector('#analysisProgressBar'),
+  analysisProgressFill: document.querySelector('#analysisProgressFill'),
+  analysisProgressSteps: document.querySelector('#analysisProgressSteps'),
   findingsMessage: document.querySelector('#findingsMessage'),
   aiAnalysisNote: document.querySelector('#aiAnalysisNote'),
+  retryAiAnalysis: document.querySelector('#retryAiAnalysis'),
   retryAnalysis: document.querySelector('#retryAnalysis'),
   findingList: document.querySelector('#findingList'),
 };
@@ -101,6 +140,7 @@ function loadCodexSettings() {
       ...DEFAULT_CODEX_SETTINGS,
       ...saved,
       enabled: saved.enabled === true,
+      filterAdsInPreview: saved.filterAdsInPreview !== false,
       provider: 'codex',
       model: ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra'].includes(saved.model)
         ? saved.model
@@ -108,6 +148,9 @@ function loadCodexSettings() {
       reasoningEffort: ['low', 'medium', 'high'].includes(saved.reasoningEffort)
         ? saved.reasoningEffort
         : DEFAULT_CODEX_SETTINGS.reasoningEffort,
+      parallelProcesses: [1, 2, 3, 4].includes(Number(saved.parallelProcesses))
+        ? Number(saved.parallelProcesses)
+        : DEFAULT_CODEX_SETTINGS.parallelProcesses,
     };
   } catch {
     return { ...DEFAULT_CODEX_SETTINGS };
@@ -126,10 +169,14 @@ function saveCodexSettings() {
 
 function syncCodexSettingsUI() {
   ui.codexEnabled.checked = codexSettings.enabled;
+  ui.filterAdsInPreview.checked = codexSettings.filterAdsInPreview;
+  ui.codexOptions.hidden = !codexSettings.enabled;
   ui.codexProvider.value = codexSettings.provider;
   ui.codexModel.value = codexSettings.model;
   ui.codexReasoning.value = codexSettings.reasoningEffort;
+  ui.parallelProcesses.value = String(codexSettings.parallelProcesses);
   renderCodexStatus();
+  renderAiAnalysisNote();
 }
 
 let sourceTargets = new Map();
@@ -179,16 +226,31 @@ function setFollowedFinding(key, activeMark = null) {
 function keepFindingVisible(key) {
   if (!key) return;
   const panel = ui.findingList.parentElement;
-  const button = ui.findingList.querySelector(`[data-finding-id="${CSS.escape(key)}"]`);
-  if (!panel || !button) return;
+  if (!panel) return;
+  const button = panel.querySelector(`[data-finding-id="${CSS.escape(key)}"]`);
+  if (!button) return;
 
+  const rejectedSection = button.closest('details.rejected-findings');
+  if (rejectedSection) rejectedSection.open = true;
   const item = button.closest('li') || button;
   const panelRect = panel.getBoundingClientRect();
   const itemRect = item.getBoundingClientRect();
   const visibleTop = panelRect.top + panel.clientTop + 8;
   const visibleBottom = panelRect.top + panel.clientTop + panel.clientHeight - 8;
-  if (itemRect.top < visibleTop) panel.scrollTop -= visibleTop - itemRect.top;
-  else if (itemRect.bottom > visibleBottom) panel.scrollTop += itemRect.bottom - visibleBottom;
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (itemRect.top < visibleTop) {
+    panel.scrollTo({ top: panel.scrollTop - (visibleTop - itemRect.top), behavior: reducedMotion ? 'auto' : 'smooth' });
+  } else if (itemRect.bottom > visibleBottom) {
+    panel.scrollTo({ top: panel.scrollTop + (itemRect.bottom - visibleBottom), behavior: reducedMotion ? 'auto' : 'smooth' });
+  }
+}
+
+function selectFinding(key, { scrollPreview = true } = {}) {
+  if (!key || !state.findings.some((finding, index) => findingKey(finding, index) === key)) return;
+  state.selectedId = key;
+  render();
+  keepFindingVisible(key);
+  if (scrollPreview && state.document?.url) scrollPageFindingIntoView(key);
 }
 
 function syncFindingToSourceScroll() {
@@ -527,6 +589,7 @@ function renderDocument() {
   if (!doc || state.screen !== 'analysis') {
     sourceMarks = [];
     sourceTargets.clear();
+    ui.readerFrame.classList.remove('is-page-preview');
     ui.pagePanel.hidden = true;
     ui.textPanel.hidden = true;
     clearPageFrame();
@@ -536,6 +599,7 @@ function renderDocument() {
   ui.documentTitle.textContent = doc.title || 'Документ без названия';
   ui.documentFormat.textContent = String(doc.format || 'ТЕКСТ').toUpperCase();
   const hasPage = Boolean(doc.url);
+  ui.readerFrame.classList.toggle('is-page-preview', hasPage);
   ui.pagePanel.hidden = !hasPage;
   ui.textPanel.hidden = hasPage;
   if (hasPage) {
@@ -557,10 +621,274 @@ function safeHttpUrl(value) {
   }
 }
 
+const previewBlockTags = 'ADDRESS, ARTICLE, BLOCKQUOTE, BR, DD, DIV, DL, DT, FIELDSET, FIGCAPTION, FIGURE, FOOTER, FORM, H1, H2, H3, H4, H5, H6, HEADER, HR, LI, MAIN, NAV, OL, P, SECTION, TABLE, TBODY, TD, TFOOT, TH, THEAD, TR, UL';
+
+function buildPagePreviewHtml(source, url, { filterAds = true } = {}) {
+  if (typeof source !== 'string' || !source.trim()) return '';
+  const parsed = new DOMParser().parseFromString(source, 'text/html');
+
+  if (filterAds) {
+    const adSelectors = [
+      '.adsbygoogle',
+      '[id^="google_ads"]',
+      '[id^="div-gpt-ad"]',
+      '[id*="yandex_rtb" i]',
+      '[class*="yandex-rtb" i]',
+      '[data-ad-slot]',
+      '[data-google-query-id]',
+      '[class~="advertisement" i]',
+      '[id~="advertisement" i]',
+      '[class~="advertising" i]',
+      '[id~="advertising" i]',
+      '[class*="ad-container" i]',
+      '[id*="ad-container" i]',
+      '[class*="ad-banner" i]',
+      '[id*="ad-banner" i]',
+      '[class*="reklama" i]',
+      '[id*="reklama" i]',
+      '[class*="реклама" i]',
+      '[id*="реклама" i]',
+    ].join(', ');
+    parsed.querySelectorAll(adSelectors).forEach((element) => element.remove());
+  }
+
+  parsed.querySelectorAll('script, iframe, frame, frameset, object, embed, portal, template, [srcdoc], link[rel~="preload"]').forEach((element) => element.remove());
+  parsed.querySelectorAll('meta[http-equiv], base').forEach((element) => element.remove());
+  for (const element of parsed.querySelectorAll('*')) {
+    for (const attribute of Array.from(element.attributes)) {
+      if (/^on/iu.test(attribute.name) || ['ping', 'autofocus', 'srcdoc'].includes(attribute.name.toLowerCase())) {
+        element.removeAttribute(attribute.name);
+      }
+    }
+    for (const attribute of ['href', 'src', 'action', 'formaction', 'xlink:href']) {
+      const value = element.getAttribute(attribute);
+      if (value && /^\s*javascript:/iu.test(value)) element.removeAttribute(attribute);
+    }
+    if (element.hasAttribute('target')) element.removeAttribute('target');
+  }
+
+  for (const anchor of parsed.querySelectorAll('a[href]')) anchor.removeAttribute('href');
+
+  const policy = parsed.createElement('meta');
+  policy.httpEquiv = 'Content-Security-Policy';
+  policy.content = "default-src 'none'; script-src 'none'; connect-src 'none'; frame-src 'none'; child-src 'none'; object-src 'none'; form-action 'none'; base-uri http: https:; style-src 'unsafe-inline' http: https:; img-src data: blob: http: https:; font-src data: http: https:; media-src http: https:";
+  const base = parsed.createElement('base');
+  base.href = url;
+  const highlightStyle = parsed.createElement('style');
+  highlightStyle.textContent = [
+    'mark.norman-source-finding { color: inherit !important; background: rgba(230, 201, 95, .38) !important; border-radius: .16em; box-decoration-break: clone; -webkit-box-decoration-break: clone; outline: 1px solid rgba(230, 201, 95, .9); text-decoration: underline; text-decoration-color: rgba(150, 118, 25, .9); text-decoration-style: dotted; scroll-margin-block-start: 5rem; cursor: pointer; }',
+    'mark.norman-source-finding[data-confidence="high"] { background: rgba(231, 121, 112, .34) !important; outline-color: rgba(231, 121, 112, .9); text-decoration-color: #b7463d; }',
+    'mark.norman-source-finding[data-confidence="medium"] { background: rgba(229, 160, 82, .36) !important; outline-color: rgba(229, 160, 82, .92); text-decoration-color: #a66320; }',
+    'mark.norman-source-finding[data-confidence="low"], mark.norman-source-finding[data-confidence="possible"] { background: rgba(230, 201, 95, .38) !important; outline-color: rgba(230, 201, 95, .92); text-decoration-color: #967619; }',
+    'mark.norman-source-finding[data-confidence="likely-false"] { background: rgba(154, 164, 170, .28) !important; outline-color: rgba(120, 130, 136, .86); text-decoration-color: #77838a; }',
+    'mark.norman-source-finding.is-followed { outline-width: 2px; box-shadow: 0 0 0 2px rgba(20, 115, 230, .22); }',
+  ].join('\n');
+  parsed.head.prepend(policy, base);
+  parsed.head.append(highlightStyle);
+  return `<!doctype html>${parsed.documentElement.outerHTML}`;
+}
+
+const previewContentSelectors = [
+  '#doc_content',
+  '#document-content',
+  '[itemprop="articleBody"]',
+  '.document-content',
+  'article',
+  '[role="main"]',
+  'main',
+];
+const previewIgnoredTextSelector = [
+  'script', 'style', 'noscript', 'svg', 'template', 'iframe', 'object', 'embed',
+  '[hidden]', '[aria-hidden="true"]', '.hide', '.hidden', '.invisible',
+  '[style*="display:none" i]', '[style*="display: none" i]',
+  '[style*="visibility:hidden" i]', '[style*="visibility: hidden" i]',
+].join(', ');
+
+function excerptOccurrenceAtOffset(text, excerpt, offset) {
+  const needle = String(excerpt || '').replace(/\s+/gu, ' ').trim().toLocaleLowerCase('ru-RU');
+  if (!needle) return 0;
+  const prefix = String(text || '').slice(0, Math.max(0, offset)).replace(/\s+/gu, ' ').toLocaleLowerCase('ru-RU');
+  let count = 0;
+  let cursor = 0;
+  while ((cursor = prefix.indexOf(needle, cursor)) >= 0) {
+    count += 1;
+    cursor += needle.length;
+  }
+  return count;
+}
+
+function findPreviewRange(sourceDocument, excerpt, occurrence = 0) {
+  const needle = String(excerpt || '').replace(/\s+/gu, ' ').trim();
+  if (!needle || !sourceDocument.body) return null;
+  // Keep preview navigation in the same article region used by link analysis.
+  const contentRoot = previewContentSelectors
+    .map((selector) => sourceDocument.querySelector(selector))
+    .find(Boolean)
+    || sourceDocument.body;
+  const walker = sourceDocument.createTreeWalker(contentRoot, NodeFilter.SHOW_TEXT);
+  const segments = [];
+  let previousBlock = null;
+  let joined = '';
+  let node;
+
+  while ((node = walker.nextNode())) {
+    const parent = node.parentElement;
+    if (!parent || parent.closest(previewIgnoredTextSelector)) continue;
+    const block = parent.closest(previewBlockTags);
+    const normalized = node.data.replace(/\s+/gu, ' ');
+    if (!normalized.trim()) continue;
+    if (joined && block !== previousBlock && !joined.endsWith(' ') && !normalized.startsWith(' ')) joined += ' ';
+    const start = joined.length;
+    joined += normalized;
+    segments.push({ node, normalized, start, end: joined.length });
+    previousBlock = block;
+  }
+
+  const haystack = joined.toLocaleLowerCase('ru-RU');
+  const searchNeedle = needle.toLocaleLowerCase('ru-RU');
+  let index = -1;
+  let cursor = 0;
+  for (let matchIndex = 0; matchIndex <= occurrence; matchIndex += 1) {
+    index = haystack.indexOf(searchNeedle, cursor);
+    if (index < 0) return null;
+    cursor = index + searchNeedle.length;
+  }
+  const endIndex = index + needle.length;
+  const startSegment = segments.find((segment) => index >= segment.start && index < segment.end);
+  const endSegment = segments.find((segment) => endIndex > segment.start && endIndex <= segment.end);
+  if (!startSegment || !endSegment) return null;
+
+  function rawOffset(segment, normalizedOffset, atEnd = false) {
+    const target = normalizedOffset - segment.start;
+    let visibleIndex = 0;
+    const text = segment.node.data;
+    for (let offset = 0; offset < text.length;) {
+      const character = String.fromCodePoint(text.codePointAt(offset));
+      const width = character.length;
+      if (/\s/u.test(character)) {
+        let runEnd = offset + width;
+        while (runEnd < text.length) {
+          const next = String.fromCodePoint(text.codePointAt(runEnd));
+          if (!/\s/u.test(next)) break;
+          runEnd += next.length;
+        }
+        if (visibleIndex === target) return atEnd ? runEnd : offset;
+        visibleIndex += 1;
+        offset = runEnd;
+      } else {
+        if (visibleIndex === target) return offset;
+        visibleIndex += width;
+        offset += width;
+      }
+    }
+    return text.length;
+  }
+
+  const range = sourceDocument.createRange();
+  range.setStart(startSegment.node, rawOffset(startSegment, index));
+  range.setEnd(endSegment.node, rawOffset(endSegment, endIndex, true));
+  return range;
+}
+
+function syncPageFrameHighlights(sourceDocument = ui.pageFrame.contentDocument) {
+  if (!sourceDocument?.body) return;
+  const findingsByKey = new Map(state.findings.map((finding, index) => [findingKey(finding, index), finding]));
+  const existingKeys = new Set();
+
+  for (const mark of sourceDocument.querySelectorAll('mark.norman-source-finding[data-finding-id]')) {
+    const key = mark.dataset.findingId;
+    const finding = findingsByKey.get(key);
+    if (!finding) {
+      mark.replaceWith(...mark.childNodes);
+      continue;
+    }
+    existingKeys.add(key);
+    mark.dataset.confidence = findingConfidenceLevel(finding);
+    mark.classList.toggle('is-followed', key === state.selectedId);
+  }
+
+  for (const [key, finding] of findingsByKey) {
+    if (existingKeys.has(key) || !finding.excerpt) continue;
+    const occurrence = excerptOccurrenceAtOffset(state.document?.text, finding.excerpt, finding.start);
+    const range = findPreviewRange(sourceDocument, finding.excerpt, occurrence);
+    if (!range) continue;
+
+    const highlight = sourceDocument.createElement('mark');
+    highlight.className = 'norman-source-finding';
+    highlight.dataset.findingId = key;
+    highlight.dataset.confidence = findingConfidenceLevel(finding);
+    highlight.tabIndex = 0;
+    highlight.setAttribute('role', 'button');
+    highlight.setAttribute('aria-label', `Показать сигнал: ${finding.title || finding.ruleTitle || 'найденный фрагмент'}`);
+    highlight.classList.toggle('is-followed', key === state.selectedId);
+    highlight.append(range.extractContents());
+    range.insertNode(highlight);
+  }
+}
+
+function scrollPageFindingIntoView(key) {
+  if (!key || pageFrameDocumentRef !== state.document) return;
+  let sourceDocument;
+  try {
+    sourceDocument = ui.pageFrame.contentDocument;
+  } catch {
+    return;
+  }
+  if (!sourceDocument?.body) return;
+  const mark = Array.from(sourceDocument.querySelectorAll('mark.norman-source-finding[data-finding-id]'))
+    .find((candidate) => candidate.dataset.findingId === key);
+  if (!mark) return;
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  mark.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'center' });
+}
+
+function markPageFrameReady(url, documentRef, loadToken) {
+  if (loadToken !== pageFrameLoadToken
+    || state.document !== documentRef
+    || pageFrameDocumentRef !== documentRef
+    || state.frameUrl !== url
+    || safeHttpUrl(state.document?.url) !== url) return;
+
+  if (pageFrameSoftTimeout) window.clearTimeout(pageFrameSoftTimeout);
+  pageFrameSoftTimeout = 0;
+  state.frameState = 'loaded';
+  ui.pageLoading.hidden = true;
+  ui.pageError.hidden = true;
+  ui.openOriginal.hidden = true;
+  try {
+    const sourceDocument = ui.pageFrame.contentDocument;
+    if (!sourceDocument?.body) return;
+    if (pageFrameBoundDocument !== sourceDocument) {
+      pageFrameBoundDocument = sourceDocument;
+      sourceDocument.addEventListener('click', (event) => {
+        const mark = event.target?.closest?.('mark.norman-source-finding[data-finding-id]');
+        if (mark) {
+          event.preventDefault();
+          selectFinding(mark.dataset.findingId, { scrollPreview: false });
+          return;
+        }
+        if (event.target?.closest?.('a[href]')) event.preventDefault();
+      });
+      sourceDocument.addEventListener('keydown', (event) => {
+        const mark = event.target?.closest?.('mark.norman-source-finding[data-finding-id]');
+        if (!mark || (event.key !== 'Enter' && event.key !== ' ')) return;
+        event.preventDefault();
+        selectFinding(mark.dataset.findingId, { scrollPreview: false });
+      });
+      sourceDocument.addEventListener('submit', (event) => event.preventDefault());
+    }
+    syncPageFrameHighlights(sourceDocument);
+    if (state.selectedId) scrollPageFindingIntoView(state.selectedId);
+  } catch {
+    // The source snapshot stays visible even if the WebView blocks DOM access.
+  }
+}
+
 function renderPageFrame(value) {
   const url = safeHttpUrl(value);
   if (!url) {
     state.frameUrl = '';
+    pageFrameDocumentRef = null;
     state.frameState = 'error';
     ui.pageFrame.hidden = true;
     ui.pageLoading.hidden = true;
@@ -569,12 +897,40 @@ function renderPageFrame(value) {
     return;
   }
 
-  if (state.frameUrl !== url) {
+  if (typeof state.document?.previewHtml !== 'string' || !state.document.previewHtml.trim()) {
     state.frameUrl = url;
+    pageFrameDocumentRef = null;
+    state.frameState = 'error';
+    ui.pageFrame.hidden = true;
+    ui.pageLoading.hidden = true;
+    ui.pageError.hidden = false;
+    ui.openOriginal.hidden = false;
+    return;
+  }
+
+  if (state.frameUrl !== url
+    || pageFrameDocumentRef !== state.document
+    || pageFrameFilterAds !== codexSettings.filterAdsInPreview) {
+    if (pageFrameSoftTimeout) window.clearTimeout(pageFrameSoftTimeout);
+    state.frameUrl = url;
+    pageFrameDocumentRef = state.document;
+    pageFrameBoundDocument = null;
+    pageFrameFilterAds = codexSettings.filterAdsInPreview;
+    const loadToken = ++pageFrameLoadToken;
     state.frameState = 'loading';
     ui.pageFrame.title = state.document?.title || 'Исходная страница';
     ui.pageFrame.hidden = false;
-    ui.pageFrame.src = url;
+    const parsed = new DOMParser().parseFromString(buildPagePreviewHtml(state.document.previewHtml, url, {
+      filterAds: codexSettings.filterAdsInPreview,
+    }), 'text/html');
+    syncPageFrameHighlights(parsed);
+    ui.pageFrame.srcdoc = `<!doctype html>${parsed.documentElement.outerHTML}`;
+    pageFrameSoftTimeout = window.setTimeout(() => {
+      if (state.frameState !== 'loading') return;
+      markPageFrameReady(url, pageFrameDocumentRef, loadToken);
+    }, 1400);
+  } else if (state.frameState === 'loaded') {
+    syncPageFrameHighlights();
   }
 
   ui.pageFrame.hidden = false;
@@ -584,13 +940,20 @@ function renderPageFrame(value) {
 }
 
 function clearPageFrame() {
+  if (pageFrameSoftTimeout) window.clearTimeout(pageFrameSoftTimeout);
+  pageFrameLoadToken += 1;
+  pageFrameSoftTimeout = 0;
   if (ui.pageFrame.hasAttribute('src')) ui.pageFrame.removeAttribute('src');
+  if (ui.pageFrame.hasAttribute('srcdoc')) ui.pageFrame.removeAttribute('srcdoc');
   ui.pageFrame.hidden = true;
   ui.pageLoading.hidden = true;
   ui.pageError.hidden = true;
   ui.openOriginal.hidden = true;
   state.frameUrl = '';
   state.frameState = 'idle';
+  pageFrameDocumentRef = null;
+  pageFrameBoundDocument = null;
+  pageFrameFilterAds = null;
 }
 
 function pluralFindings(count) {
@@ -679,16 +1042,14 @@ async function refreshCodexStatus() {
 
 function renderAiAnalysisNote() {
   let message = '';
-  if (state.aiAnalysis === 'checking') message = 'Проверяем доступность Codex…';
-  else if (state.aiAnalysis === 'running') {
-    const { phase, completed, total } = state.aiProgress || {};
-    const action = phase === 'verify' ? 'Проверяем локальные сигналы' : 'Ищем дополнительные сигналы';
-    message = Number.isFinite(completed) && Number.isFinite(total)
-      ? `Codex: ${action.toLocaleLowerCase('ru-RU')} · ${completed} / ${total}.`
-      : `Codex: ${action.toLocaleLowerCase('ru-RU')}…`;
-  } else if (state.aiAnalysis === 'error' || state.aiAnalysis === 'unavailable') message = state.aiAnalysisMessage;
+  if (state.aiAnalysis === 'error' || state.aiAnalysis === 'unavailable') message = state.aiAnalysisMessage;
   ui.aiAnalysisNote.textContent = message;
+  ui.aiAnalysisNote.dataset.state = state.aiAnalysis;
   ui.aiAnalysisNote.hidden = !message;
+  const retryable = state.aiAnalysis === 'error' || state.aiAnalysis === 'unavailable';
+  const retrying = state.aiAnalysis === 'checking' || state.aiAnalysis === 'running';
+  ui.retryAiAnalysis.hidden = state.analysis !== 'done' || (!retryable && !retrying);
+  ui.retryAiAnalysis.disabled = retrying || !codexSettings.enabled;
 }
 
 function renderFindingsMessage() {
@@ -704,15 +1065,93 @@ function renderFindingsMessage() {
 }
 
 function renderProgress() {
-  ui.analysisStatus.hidden = state.analysis !== 'running';
-}
+  const codexBusy = state.aiAnalysis === 'checking' || state.aiAnalysis === 'running';
+  ui.analysisStatus.hidden = state.analysis !== 'running' && !codexBusy;
 
-function confidenceLevel(value) {
-  const confidence = String(value || '').toLocaleLowerCase();
-  if (confidence.includes('высок') || confidence === 'high') return 'high';
-  if (confidence.includes('средн') || confidence === 'medium') return 'medium';
-  if (confidence.includes('низк') || confidence === 'low') return 'low';
-  return 'unknown';
+  const showCodexProgress = codexSettings.enabled
+    && Boolean(state.document)
+    && state.analysis !== 'idle'
+    && (state.analysis === 'running' || state.aiAnalysis !== 'idle');
+  ui.analysisProgress.hidden = !showCodexProgress;
+  if (ui.analysisProgress.hidden) return;
+
+  const aiProgress = state.aiProgress || {};
+  const phase = aiProgress.phase;
+  const ruleProgress = state.progress || {};
+  const completedRules = Number(ruleProgress.completedRules ?? ruleProgress.completed_rules);
+  const totalRules = Number(ruleProgress.totalRules ?? ruleProgress.total_rules);
+  const completed = Number(aiProgress.completed);
+  const total = Number(aiProgress.total);
+  const localDone = state.analysis === 'done' || state.aiAnalysis !== 'idle';
+  const localStatus = localDone
+    ? 'complete'
+    : state.analysis === 'error' ? 'error' : state.analysis === 'running' ? 'running' : 'pending';
+  const contextStatus = state.aiAnalysis === 'error' || state.aiAnalysis === 'unavailable'
+    ? phase === 'discover' ? 'complete' : 'error'
+    : state.aiAnalysis === 'done' || phase === 'discover'
+      ? 'complete'
+      : state.aiAnalysis === 'checking' || phase === 'verify' ? 'running' : 'pending';
+  const globalStatus = state.aiAnalysis === 'done'
+    ? 'complete'
+    : state.aiAnalysis === 'error' || state.aiAnalysis === 'unavailable'
+      ? phase === 'discover' ? 'error' : 'skipped'
+      : phase === 'discover' ? 'running' : 'pending';
+  const stages = [
+    {
+      label: 'Текст',
+      description: 'Текст документа проверяется по локальному каталогу правил.',
+      status: localStatus,
+      progress: Number.isFinite(completedRules) && totalRules > 0 ? Math.min(1, completedRules / totalRules) : 0.05,
+    },
+    {
+      label: 'Контекст',
+      description: 'Проверяется контекст каждого найденного сигнала.',
+      status: contextStatus,
+      progress: Number.isFinite(completed) && total > 0 ? Math.min(1, completed / total) : state.aiAnalysis === 'checking' ? 0.03 : 0.05,
+    },
+    {
+      label: 'Весь текст',
+      description: 'Документ целиком проверяется на дополнительные сигналы.',
+      status: globalStatus,
+      progress: Number.isFinite(completed) && total > 0 ? Math.min(1, completed / total) : 0.05,
+    },
+  ];
+
+  const terminal = (status) => status === 'complete' || status === 'error' || status === 'skipped';
+  let fraction = stages.filter((stage) => terminal(stage.status)).length;
+  const active = stages.find((stage) => stage.status === 'running');
+  if (active) fraction += active.progress;
+  const percentage = Math.round((fraction / stages.length) * 100);
+  ui.analysisProgress.dataset.state = stages.every((stage) => stage.status === 'complete') ? 'complete' : 'running';
+  ui.analysisProgressBar.setAttribute('aria-valuenow', String(percentage));
+  ui.analysisProgressBar.setAttribute('aria-valuetext', `${percentage}%`);
+  ui.analysisProgressFill.style.width = `${percentage}%`;
+  const focusedStep = ui.analysisProgressSteps.contains(document.activeElement)
+    ? Array.from(ui.analysisProgressSteps.children).indexOf(document.activeElement)
+    : -1;
+  ui.analysisProgressSteps.replaceChildren(...stages.map((stage, index) => {
+    const item = document.createElement('li');
+    item.className = 'analysis-step';
+    item.dataset.state = stage.status;
+    item.tabIndex = 0;
+    const tooltipId = `analysisStepTooltip${index + 1}`;
+    item.setAttribute('aria-describedby', tooltipId);
+    const mark = document.createElement('span');
+    mark.className = 'analysis-step-mark';
+    mark.setAttribute('aria-hidden', 'true');
+    mark.textContent = stage.status === 'complete' ? '✓' : stage.status === 'error' ? '!' : stage.status === 'skipped' ? '–' : '';
+    const label = document.createElement('span');
+    label.className = 'analysis-step-label';
+    label.textContent = stage.label;
+    const tooltip = document.createElement('span');
+    tooltip.className = 'analysis-step-tooltip';
+    tooltip.id = tooltipId;
+    tooltip.setAttribute('role', 'tooltip');
+    tooltip.textContent = stage.description;
+    item.append(mark, label, tooltip);
+    return item;
+  }));
+  if (focusedStep >= 0) ui.analysisProgressSteps.children[focusedStep]?.focus({ preventScroll: true });
 }
 
 function isAiFinding(finding) {
@@ -741,22 +1180,201 @@ function aiConfidenceLabel(value) {
   })[aiConfidenceLevel(value)];
 }
 
-function createFindingRow(finding, index) {
-  const key = findingKey(finding, index);
+function findingConfidenceLevel(finding) {
+  return isAiFinding(finding) ? aiConfidenceLevel(finding.aiConfidence) : 'possible';
+}
+
+function findingConfidenceMarker(confidence) {
+  return ({ high: 'А', medium: 'Б', low: 'В', possible: 'В', 'likely-false': '×' })[confidence] || '?';
+}
+
+function findingRowData(finding) {
   const aiFinding = isAiFinding(finding);
   const fullTitle = finding.title || finding.factor || 'Возможный сигнал';
   const shortTitle = fullTitle
     .replace(/^Возможн(?:ое|ая)\s+/u, '')
     .replace(/^./u, (character) => character.toLocaleUpperCase('ru-RU'));
+  const location = state.document && isValidFinding(finding)
+    ? articleAndPart(state.document.text, finding.start, finding.end)
+    : 'Источник';
+  const rejectedByAi = aiConfidenceLevel(finding.aiConfidence) === 'likely-false';
+  const rejectionReason = rejectedByAi
+    ? String(finding.aiRejectionReason || finding.aiRationale || '').trim()
+    : '';
+  const reason = rejectionReason
+    ? `Причина отсева: ${rejectionReason}`
+    : (aiFinding && finding.aiRationale) || finding.reason || 'Совпадение правила требует проверки в контексте.';
+  return {
+    aiFinding,
+    fullTitle,
+    shortTitle,
+    location,
+    reason,
+    confidence: findingConfidenceLevel(finding),
+    origin: String(finding.origin || (finding.aiConfidence != null ? 'algorithm' : 'codex')).toLocaleLowerCase(),
+    signature: JSON.stringify([
+      fullTitle, location, finding.factor || '', finding.excerpt || '', reason,
+      aiFinding, finding.confidence || '', finding.aiConfidence || '', finding.origin || '',
+    ]),
+  };
+}
+
+function findingContextWindow(finding, padding = 800) {
+  const text = state.document?.text || '';
+  if (!isValidFinding(finding) || text.slice(finding.start, finding.end) !== finding.excerpt) return finding.excerpt || '';
+
+  let start = finding.start;
+  let leftCount = 0;
+  while (start > 0 && leftCount < padding) {
+    start -= 1;
+    const current = text.charCodeAt(start);
+    if (current >= 0xdc00 && current <= 0xdfff && start > 0) {
+      const previous = text.charCodeAt(start - 1);
+      if (previous >= 0xd800 && previous <= 0xdbff) start -= 1;
+    }
+    leftCount += 1;
+  }
+
+  let end = finding.end;
+  let rightCount = 0;
+  while (end < text.length && rightCount < padding) {
+    const codePoint = text.codePointAt(end);
+    end += codePoint > 0xffff ? 2 : 1;
+    rightCount += 1;
+  }
+  return text.slice(start, end);
+}
+
+function aiReviewConfidenceLabel(value) {
+  return ({
+    high: 'Вероятнее всего нарушение',
+    medium: 'Вероятно нарушение',
+    low: 'Возможно нарушение',
+    'likely-false': 'Сигнал отсеян',
+    unknown: 'Уровень не указан',
+  })[aiConfidenceLevel(value)];
+}
+
+function openAiReview(key) {
+  const index = state.findings.findIndex((finding, itemIndex) => findingKey(finding, itemIndex) === key);
+  if (index < 0) return;
+  const finding = state.findings[index];
+  const globalAnalysis = String(finding.origin || '').toLocaleLowerCase() === 'codex';
+  const confidence = aiConfidenceLevel(finding.aiConfidence);
+  const sourceText = state.document?.text || '';
+  const documentTextLimit = 20_000;
+
+  ui.aiReviewMode.textContent = globalAnalysis
+    ? 'Глобальный анализ всего текста для поиска новых сигналов.'
+    : 'Проверка найденного сигнала по фрагменту, контексту и правилу.';
+  ui.aiReviewSourceName.textContent = state.document?.title || state.document?.url || 'Источник';
+  ui.aiReviewRule.textContent = finding.ruleId || 'Не указано';
+  ui.aiReviewFactor.textContent = finding.factor || 'Не указан';
+  ui.aiReviewRuleReason.textContent = finding.reason || 'Не указано';
+  ui.aiReviewExcerpt.textContent = finding.excerpt || 'Фрагмент не сохранён.';
+
+  const context = globalAnalysis ? '' : findingContextWindow(finding);
+  ui.aiReviewContextLabel.hidden = !context || context === finding.excerpt;
+  ui.aiReviewContextLabel.textContent = 'Контекст источника (до 800 символов до и после фрагмента)';
+  ui.aiReviewContext.hidden = !context || context === finding.excerpt;
+  ui.aiReviewContext.textContent = context;
+
+  ui.aiReviewDocumentDetails.hidden = !globalAnalysis || !sourceText;
+  ui.aiReviewDocumentDetails.open = globalAnalysis;
+  ui.aiReviewDocumentSummary.textContent = sourceText.length > documentTextLimit
+    ? `Текст документа · показано ${documentTextLimit.toLocaleString('ru-RU')} из ${sourceText.length.toLocaleString('ru-RU')} символов`
+    : `Текст документа · ${sourceText.length.toLocaleString('ru-RU')} символов`;
+  ui.aiReviewDocumentText.textContent = sourceText.length > documentTextLimit
+    ? `${sourceText.slice(0, documentTextLimit)}\n…`
+    : sourceText;
+
+  ui.aiReviewRationale.textContent = finding.aiRationale || 'Краткое обоснование не сохранено.';
+  ui.aiReviewResult.dataset.confidence = confidence;
+  ui.aiReviewConfidenceMark.textContent = findingConfidenceMarker(confidence);
+  ui.aiReviewConfidence.textContent = aiReviewConfidenceLabel(finding.aiConfidence);
+  ui.aiReviewDecision.textContent = confidence === 'likely-false'
+    ? `Сигнал отсеян. ${finding.aiRejectionReason || ''}`.trim()
+    : 'Сигнал оставлен для экспертной проверки.';
+  ui.aiReviewDialog.showModal();
+}
+
+function findingAriaLabel(finding, data, verifyStatus) {
+  return [
+    data.fullTitle,
+    data.location,
+    `Уровень ${findingConfidenceMarker(data.confidence)}`,
+    data.aiFinding ? `Уверенность Codex ${aiConfidenceLabel(finding.aiConfidence)}` : 'Возможно нарушение',
+    verifyStatus === 'active' ? 'Проверяется' : verifyStatus === 'queued' ? 'В очереди' : '',
+  ].filter(Boolean).join('. ');
+}
+
+function setFindingVerifyStatus(item, finding, data, verifyStatus) {
+  const button = item.querySelector('.finding-summary');
+  if (verifyStatus) item.dataset.verifyStatus = verifyStatus;
+  else delete item.dataset.verifyStatus;
+  button.setAttribute('aria-label', findingAriaLabel(finding, data, verifyStatus));
+}
+
+function setFindingDetailsExpanded(details, expanded) {
+  const previousAnimation = findingDetailsAnimations.get(details);
+  const wasHidden = details.hidden;
+  const currentHeight = wasHidden ? 0 : details.getBoundingClientRect().height;
+  const currentOpacity = wasHidden ? 0 : Number.parseFloat(window.getComputedStyle(details).opacity) || 1;
+  previousAnimation?.cancel();
+  findingDetailsAnimations.delete(details);
+
+  details.inert = !expanded;
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches || typeof details.animate !== 'function') {
+    details.hidden = !expanded;
+    return;
+  }
+
+  if (expanded) details.hidden = false;
+  const targetHeight = expanded ? details.getBoundingClientRect().height : 0;
+  const animation = details.animate([
+    { height: `${currentHeight}px`, opacity: currentOpacity, clipPath: 'inset(0 0 0)' },
+    { height: `${targetHeight}px`, opacity: expanded ? 1 : 0, clipPath: expanded ? 'inset(0 0 0)' : 'inset(0 0 100%)' },
+  ], {
+    duration: expanded ? 220 : 150,
+    easing: expanded ? 'cubic-bezier(0.2, 0.7, 0.2, 1)' : 'ease-in',
+    fill: 'both',
+  });
+  findingDetailsAnimations.set(details, animation);
+  animation.addEventListener('finish', () => {
+    if (findingDetailsAnimations.get(details) !== animation) return;
+    findingDetailsAnimations.delete(details);
+    if (!expanded) details.hidden = true;
+    animation.cancel();
+  }, { once: true });
+  animation.addEventListener('cancel', () => {
+    if (findingDetailsAnimations.get(details) === animation) findingDetailsAnimations.delete(details);
+  }, { once: true });
+}
+
+function syncFindingRow(item, finding, verifyStatus) {
+  const expanded = item.dataset.findingKey === state.selectedId;
+  const wasExpanded = item.dataset.expanded === 'true';
+  const button = item.querySelector('.finding-summary');
+  item.dataset.expanded = String(expanded);
+  button.setAttribute('aria-expanded', String(expanded));
+  if (wasExpanded !== expanded) {
+    setFindingDetailsExpanded(item.querySelector('.finding-details'), expanded);
+  }
+  setFindingVerifyStatus(item, finding, findingRowData(finding), verifyStatus);
+}
+
+function createFindingRow(finding, key, verifyStatus, data = findingRowData(finding)) {
   const item = document.createElement('li');
   item.className = 'finding-card';
-  item.dataset.confidence = aiFinding ? aiConfidenceLevel(finding.aiConfidence) : confidenceLevel(finding.confidence);
+  item.dataset.findingKey = key;
+  item.dataset.renderSignature = data.signature;
+  item.dataset.confidence = data.confidence;
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'finding-summary';
   button.dataset.findingId = key;
-  if (aiFinding) {
-    item.dataset.origin = String(finding.origin || (finding.aiConfidence != null ? 'algorithm' : 'codex')).toLocaleLowerCase();
+  if (data.aiFinding) {
+    item.dataset.origin = data.origin;
     item.dataset.aiConfidence = aiConfidenceLevel(finding.aiConfidence);
   }
   const expanded = key === state.selectedId;
@@ -765,37 +1383,35 @@ function createFindingRow(finding, index) {
 
   const details = document.createElement('div');
   details.className = 'finding-details';
-  details.id = `finding-details-${index}`;
+  details.id = `finding-details-${encodeURIComponent(key)}`;
   details.hidden = !expanded;
   button.setAttribute('aria-controls', details.id);
 
   const location = document.createElement('span');
   location.className = 'finding-location';
-  location.textContent = state.document && isValidFinding(finding)
-    ? articleAndPart(state.document.text, finding.start, finding.end)
-    : 'Источник';
+  location.textContent = data.location;
   const meta = document.createElement('div');
   meta.className = 'finding-meta';
   meta.append(location);
-  if (aiFinding) {
-    const origin = document.createElement('span');
+  if (data.aiFinding) {
+    const origin = document.createElement('button');
+    origin.type = 'button';
     origin.className = 'finding-origin';
+    origin.dataset.aiReviewFinding = key;
+    origin.setAttribute('aria-haspopup', 'dialog');
+    origin.setAttribute('aria-label', 'Показать данные проверки ChatGPT (Codex)');
+    origin.title = 'Показать входные данные и результат проверки';
     origin.textContent = 'Codex';
     meta.append(origin);
   }
 
   const title = document.createElement('strong');
   title.className = 'finding-title';
-  title.textContent = shortTitle;
+  title.textContent = data.shortTitle;
   const indicator = document.createElement('span');
   indicator.className = 'confidence-indicator';
   indicator.setAttribute('aria-hidden', 'true');
-  button.setAttribute('aria-label', [
-    fullTitle,
-    location.textContent,
-    aiFinding ? `Уверенность Codex ${aiConfidenceLabel(finding.aiConfidence)}`
-      : finding.confidence ? 'Уверенность ' + finding.confidence : 'Уверенность не указана',
-  ].join('. '));
+  indicator.textContent = findingConfidenceMarker(data.confidence);
   button.append(title, indicator);
 
   const factor = document.createElement('span');
@@ -808,20 +1424,148 @@ function createFindingRow(finding, index) {
 
   const reason = document.createElement('span');
   reason.className = 'finding-reason';
-  reason.textContent = (aiFinding && finding.aiRationale) || finding.reason || 'Совпадение правила требует проверки в контексте.';
+  reason.textContent = data.reason;
 
   details.append(meta);
   if (finding.factor) details.append(factor);
   if (finding.excerpt) details.append(excerpt);
   details.append(reason);
   item.append(button, details);
+  setFindingVerifyStatus(item, finding, data, verifyStatus);
   return item;
 }
 
+function ensureRejectedFindingsSection() {
+  if (rejectedFindingsSection) return;
+  rejectedFindingsSection = document.createElement('details');
+  rejectedFindingsSection.className = 'rejected-findings';
+  const summary = document.createElement('summary');
+  summary.className = 'rejected-findings-summary';
+  const title = document.createElement('span');
+  title.textContent = 'Отсеянное';
+  rejectedFindingsCount = document.createElement('span');
+  rejectedFindingsCount.className = 'result-count rejected-findings-count';
+  summary.append(title, rejectedFindingsCount);
+  rejectedFindingsList = document.createElement('ol');
+  rejectedFindingsList.className = 'finding-list rejected-findings-list';
+  rejectedFindingsSection.append(summary, rejectedFindingsList);
+  ui.findingList.after(rejectedFindingsSection);
+}
+
+function findingVerificationStatuses(entries) {
+  const progress = state.aiProgress || {};
+  const verifying = (state.aiAnalysis === 'checking' || state.aiAnalysis === 'running')
+    && progress.phase === 'verify';
+  if (!verifying) return new Map();
+
+  const algorithmFindings = entries
+    .filter(({ finding }) => String(finding.origin || '').toLocaleLowerCase() === 'algorithm' || !isAiFinding(finding))
+    .sort((left, right) => (left.finding.start ?? Number.MAX_SAFE_INTEGER) - (right.finding.start ?? Number.MAX_SAFE_INTEGER)
+      || (left.finding.end ?? Number.MAX_SAFE_INTEGER) - (right.finding.end ?? Number.MAX_SAFE_INTEGER)
+      || String(left.finding.ruleId || '').localeCompare(String(right.finding.ruleId || '')));
+  const pendingFindings = algorithmFindings.filter(({ finding }) => !finding.aiConfidence);
+  if (Array.isArray(progress.activeFindingIds)) {
+    const activeIds = new Set(progress.activeFindingIds.map(String));
+    return new Map(pendingFindings.map(({ key, finding }) => [
+      key,
+      activeIds.has(String(finding.id || '')) ? 'active' : 'queued',
+    ]));
+  }
+  const completedValue = Number(progress.completed);
+  const completed = Number.isFinite(completedValue) ? Math.max(0, Math.floor(completedValue)) : 0;
+  return new Map(algorithmFindings.slice(completed).map(({ key }, index) => [key, index === 0 ? 'active' : 'queued']));
+}
+
+function renderFindingRows(list, entries, existingNodes, statuses, desiredNodes, enteringNodes, renderedIndices) {
+  entries.forEach(({ finding, key }, position) => {
+    const existing = existingNodes.get(key);
+    const data = findingRowData(finding);
+    const item = existing?.dataset.renderSignature === data.signature
+      ? existing
+      : createFindingRow(finding, key, statuses.get(key), data);
+    if (item === existing) {
+      syncFindingRow(item, finding, statuses.get(key));
+    } else if (!existing) {
+      enteringNodes.set(item, position);
+    }
+    desiredNodes.add(item);
+    renderedIndices.set(key, { list, index: position, item });
+    const current = list.children[position];
+    if (current !== item) list.insertBefore(item, current || null);
+  });
+}
+
+function animateFindingChanges(oldOrder, oldPositions, renderedIndices, enteringNodes, orderChanged, reducedMotion) {
+  if (reducedMotion) return;
+
+  for (const [item, position] of enteringNodes) {
+    if (!item.getClientRects().length) continue;
+    item.style.setProperty('--finding-entry-delay', `${Math.min(position, 4) * 22}ms`);
+    item.classList.add('is-entering');
+    const finishEntry = (event) => {
+      if (event.target !== item) return;
+      item.classList.remove('is-entering');
+      item.style.removeProperty('--finding-entry-delay');
+      item.removeEventListener('animationend', finishEntry);
+    };
+    item.addEventListener('animationend', finishEntry);
+  }
+  if (!orderChanged) return;
+
+  for (const [key, current] of renderedIndices) {
+    const previous = oldOrder.get(key);
+    const oldTop = oldPositions.get(key);
+    if (!previous || !Number.isFinite(oldTop) || previous.list === current.list && previous.index === current.index) continue;
+    const newRect = current.item.getBoundingClientRect();
+    if (!newRect.height) continue;
+    const delta = oldTop - newRect.top;
+    if (Math.abs(delta) < 1) continue;
+    current.item.animate([
+      { transform: `translateY(${delta}px)`, opacity: 0.84 },
+      { transform: 'translateY(0)', opacity: 1 },
+    ], { duration: 180, easing: 'ease-out' });
+  }
+}
+
 function renderFindings() {
-  const count = state.findings.length;
-  ui.resultCount.textContent = state.analysis === 'idle' && !state.document ? '—' : String(count);
-  ui.findingList.replaceChildren(...state.findings.map(createFindingRow));
+  ensureRejectedFindingsSection();
+  const entries = state.findings.map((finding, index) => ({ finding, index, key: findingKey(finding, index), confidence: findingConfidenceLevel(finding) }));
+  const priority = { high: 0, medium: 1, low: 2, possible: 3, unknown: 4, 'likely-false': 5 };
+  entries.sort((left, right) => priority[left.confidence] - priority[right.confidence] || left.index - right.index);
+  const rejected = entries.filter(({ confidence }) => confidence === 'likely-false');
+  const visible = entries.filter(({ confidence }) => confidence !== 'likely-false');
+  ui.resultCount.textContent = state.analysis === 'idle' && !state.document ? '—' : String(visible.length);
+  const statuses = findingVerificationStatuses(entries);
+  const orderSignature = JSON.stringify([visible.map(({ key }) => key), rejected.map(({ key }) => key)]);
+  const orderChanged = orderSignature !== renderedFindingsOrderSignature;
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const existingNodes = new Map();
+  const oldOrder = new Map();
+  const oldPositions = new Map();
+  for (const list of [ui.findingList, rejectedFindingsList]) {
+    Array.from(list.children).forEach((item, index) => {
+      const key = item.dataset.findingKey;
+      if (!key) return;
+      existingNodes.set(key, item);
+      oldOrder.set(key, { list, index });
+      if (orderChanged && !reducedMotion) {
+        const rect = item.getBoundingClientRect();
+        if (rect.height) oldPositions.set(key, rect.top);
+      }
+    });
+  }
+  const desiredNodes = new Set();
+  const enteringNodes = new Map();
+  const renderedIndices = new Map();
+  renderFindingRows(ui.findingList, visible, existingNodes, statuses, desiredNodes, enteringNodes, renderedIndices);
+  renderFindingRows(rejectedFindingsList, rejected, existingNodes, statuses, desiredNodes, enteringNodes, renderedIndices);
+  for (const item of ui.findingList.parentElement.querySelectorAll('.finding-card')) {
+    if (!desiredNodes.has(item)) item.remove();
+  }
+  rejectedFindingsCount.textContent = String(rejected.length);
+  rejectedFindingsSection.hidden = rejected.length === 0;
+  renderedFindingsOrderSignature = orderSignature;
+  animateFindingChanges(oldOrder, oldPositions, renderedIndices, enteringNodes, orderChanged, reducedMotion);
   renderFindingsMessage();
   renderAiAnalysisNote();
   renderProgress();
@@ -846,6 +1590,7 @@ function updateCodexFinding(tab, token, finding) {
 async function analyzeCodexInBrowser(input, onProgress, onFinding) {
   const response = await fetch('/__norman/codex/analyze', {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       Accept: 'application/x-ndjson',
       'Content-Type': 'application/json',
@@ -896,7 +1641,7 @@ async function analyzeCodexInBrowser(input, onProgress, onFinding) {
   return complete;
 }
 
-async function executeCodexReview(tab, token) {
+async function executeCodexReview(tab, token, parallelProcesses) {
   tab.aiAnalysis = 'checking';
   tab.aiAnalysisMessage = '';
   tab.aiProgress = null;
@@ -932,6 +1677,7 @@ async function executeCodexReview(tab, token) {
       findings: tab.findings,
       model: codexSettings.model,
       reasoningEffort: codexSettings.reasoningEffort,
+      parallelProcesses,
     };
     if (isTauri) {
       try {
@@ -954,7 +1700,6 @@ async function executeCodexReview(tab, token) {
   } catch (error) {
     if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
     tab.aiAnalysis = 'error';
-    tab.aiProgress = null;
     tab.aiAnalysisMessage = `Проверка Codex не завершилась. Локальные результаты сохранены. ${messageFrom(error)}`;
   } finally {
     for (const stop of unlisten) stop();
@@ -973,6 +1718,7 @@ function render() {
 
 async function executeAnalysis(tab, token) {
   if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
+  const parallelProcesses = codexSettings.parallelProcesses;
   let stopListening = null;
   if (isTauri) {
     try {
@@ -990,16 +1736,16 @@ async function executeAnalysis(tab, token) {
 
   try {
     const result = isTauri
-      ? await invoke('analyze_text', { text: tab.document.text })
+      ? await invoke('analyze_text', { text: tab.document.text, parallelProcesses })
       : await (await import('./browser-runtime.js')).analyzeTextInBrowser(tab.document.text, (payload) => {
         if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
         tab.progress = payload;
         if (Array.isArray(payload.findings)) appendFindings(payload.findings, tab);
         reflectAnalysisTab(tab);
-      });
+      }, parallelProcesses);
     if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
     tab.findings = mergeFindings(tab.findings, Array.isArray(result?.findings) ? result.findings : []);
-    if (codexSettings.enabled) await executeCodexReview(tab, token);
+    if (codexSettings.enabled) await executeCodexReview(tab, token, parallelProcesses);
     tab.analysis = 'done';
     tab.progress = null;
   } catch (error) {
@@ -1030,7 +1776,8 @@ function reflectAnalysisTab(tab) {
 
 function runAnalysis(tabId = state.activeId) {
   const tab = tabById(tabId);
-  if (!tab || !tab.document || tab.analysis === 'running') return Promise.resolve();
+  if (!tab || !tab.document || tab.analysis === 'running'
+    || tab.aiAnalysis === 'checking' || tab.aiAnalysis === 'running') return Promise.resolve();
 
   const token = ++tab.analysisToken;
   tab.analysis = 'running';
@@ -1051,6 +1798,16 @@ function runAnalysis(tabId = state.activeId) {
   return job;
 }
 
+async function retryCodexAnalysis(tabId = state.activeId) {
+  const tab = tabById(tabId);
+  if (!tab || !tab.document || tab.analysis !== 'done'
+    || (tab.aiAnalysis !== 'error' && tab.aiAnalysis !== 'unavailable')
+    || !codexSettings.enabled) return;
+
+  // A retry is a new full run: local rules and every AI stage start again without cached answers.
+  return runAnalysis(tab.id);
+}
+
 async function receiveDocument(load) {
   state.sourceLoading = true;
   state.loadError = '';
@@ -1065,6 +1822,7 @@ async function receiveDocument(load) {
       url: doc.url || '',
       format: doc.format || 'ТЕКСТ',
       text: doc.text,
+      previewHtml: typeof doc.previewHtml === 'string' ? doc.previewHtml : (typeof doc.html === 'string' ? doc.html : ''),
     };
     const tab = createDocumentTab(documentData);
     state.tabs.push(tab);
@@ -1238,21 +1996,40 @@ ui.newDocument.addEventListener('click', startNewTab);
 ui.openSettings.addEventListener('click', () => {
   syncCodexSettingsUI();
   ui.settingsDialog.showModal();
-  void refreshCodexStatus();
+  if (codexSettings.enabled) void refreshCodexStatus();
 });
 ui.closeSettings.addEventListener('click', () => ui.settingsDialog.close());
+ui.closeAiReview.addEventListener('click', () => ui.aiReviewDialog.close());
+ui.aiReviewDialog.addEventListener('click', (event) => {
+  if (event.target === ui.aiReviewDialog) ui.aiReviewDialog.close();
+});
 ui.checkCodexStatus.addEventListener('click', () => void refreshCodexStatus());
 ui.settingsDialog.addEventListener('click', (event) => {
   if (event.target === ui.settingsDialog) ui.settingsDialog.close();
 });
 ui.settingsDialog.addEventListener('change', (event) => {
   if (event.target.matches('input[name="theme"]')) setTheme(event.target.value);
-  if (event.target === ui.codexEnabled) codexSettings.enabled = ui.codexEnabled.checked;
+  if (event.target === ui.filterAdsInPreview) {
+    codexSettings.filterAdsInPreview = ui.filterAdsInPreview.checked;
+    saveCodexSettings();
+    state.frameUrl = '';
+    render();
+  }
+  if (event.target === ui.codexEnabled) {
+    codexSettings.enabled = ui.codexEnabled.checked;
+    syncCodexSettingsUI();
+    render();
+  }
   if (event.target === ui.codexModel) codexSettings.model = ui.codexModel.value;
   if (event.target === ui.codexReasoning) codexSettings.reasoningEffort = ui.codexReasoning.value;
-  if (event.target === ui.codexEnabled || event.target === ui.codexModel || event.target === ui.codexReasoning) {
+  if (event.target === ui.parallelProcesses) {
+    const selected = Number(ui.parallelProcesses.value);
+    codexSettings.parallelProcesses = [1, 2, 3, 4].includes(selected) ? selected : 1;
+  }
+  if (event.target === ui.codexEnabled || event.target === ui.codexModel || event.target === ui.codexReasoning || event.target === ui.parallelProcesses) {
     saveCodexSettings();
   }
+  if (event.target === ui.codexEnabled && codexSettings.enabled) void refreshCodexStatus();
 });
 
 ui.tabList.addEventListener('click', (event) => {
@@ -1276,30 +2053,42 @@ ui.tabList.addEventListener('keydown', (event) => {
 });
 
 ui.pageFrame.addEventListener('load', () => {
-  if (!state.document?.url || state.frameUrl !== safeHttpUrl(state.document.url)) return;
-  state.frameState = 'loaded';
-  ui.pageLoading.hidden = true;
-  ui.pageError.hidden = true;
-  ui.openOriginal.hidden = true;
+  const url = safeHttpUrl(state.document?.url);
+  if (!url || !pageFrameDocumentRef) return;
+  markPageFrameReady(url, pageFrameDocumentRef, pageFrameLoadToken);
 });
 
 ui.pageFrame.addEventListener('error', () => {
   if (!state.document?.url || state.frameUrl !== safeHttpUrl(state.document.url)) return;
+  if (pageFrameSoftTimeout) window.clearTimeout(pageFrameSoftTimeout);
+  pageFrameSoftTimeout = 0;
   state.frameState = 'error';
   ui.pageLoading.hidden = true;
   ui.pageError.hidden = false;
   ui.openOriginal.hidden = false;
 });
 
-ui.findingList.addEventListener('click', (event) => {
+ui.findingList.parentElement.addEventListener('click', (event) => {
+  const reviewButton = event.target.closest('[data-ai-review-finding]');
+  if (reviewButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    openAiReview(reviewButton.dataset.aiReviewFinding);
+    return;
+  }
   const button = event.target.closest('[data-finding-id]');
   if (!button) return;
   state.selectedId = state.selectedId === button.dataset.findingId ? null : button.dataset.findingId;
   render();
-  const target = sourceTargets.get(state.selectedId);
-  if (target) {
-    target.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
-    target.focus({ preventScroll: true });
+  if (state.selectedId) {
+    if (state.document?.url) scrollPageFindingIntoView(state.selectedId);
+    else {
+      const target = sourceTargets.get(state.selectedId);
+      if (target) {
+        target.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+        target.focus({ preventScroll: true });
+      }
+    }
   }
   keepFindingVisible(state.selectedId || followedFindingId);
 });
@@ -1318,6 +2107,7 @@ ui.documentText.addEventListener('click', (event) => {
 ui.textPanel.addEventListener('scroll', scheduleFindingToSourceScroll, { passive: true });
 
 ui.retryAnalysis.addEventListener('click', () => runAnalysis());
+ui.retryAiAnalysis.addEventListener('click', () => { void retryCodexAnalysis(); });
 ui.dismissError.addEventListener('click', () => {
   state.loadError = '';
   renderError();

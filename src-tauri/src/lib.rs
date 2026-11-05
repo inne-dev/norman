@@ -28,7 +28,16 @@ const MAX_URL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_URL_REDIRECTS: usize = 5;
 const MAX_FINDINGS: usize = 500;
 const MAX_FINDINGS_PER_RULE: usize = 40;
+const MAX_PARALLEL_PROCESSES: usize = 4;
 const RULES_JSON: &str = include_str!("../../data/rules.json");
+
+pub(super) fn normalize_parallel_processes(value: Option<serde_json::Value>) -> usize {
+    value
+        .and_then(|value| value.as_u64())
+        .filter(|count| (1..=MAX_PARALLEL_PROCESSES as u64).contains(count))
+        .map(|count| count as usize)
+        .unwrap_or(1)
+}
 
 #[derive(Debug, Error)]
 enum AppError {
@@ -89,6 +98,8 @@ pub struct LoadedDocument {
     pub url: Option<String>,
     pub format: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_html: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -109,6 +120,8 @@ pub struct Finding {
     pub ai_confidence: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_rationale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_rejection_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -176,9 +189,14 @@ async fn load_url(url: String) -> Result<LoadedDocument, String> {
 }
 
 #[tauri::command]
-async fn analyze_text(app: tauri::AppHandle, text: String) -> Result<AnalysisResult, String> {
+async fn analyze_text(
+    app: tauri::AppHandle,
+    text: String,
+    parallel_processes: Option<serde_json::Value>,
+) -> Result<AnalysisResult, String> {
+    let parallel_processes = normalize_parallel_processes(parallel_processes);
     tokio::task::spawn_blocking(move || {
-        analyze_document_with_progress(&text, |progress| {
+        analyze_document_with_progress_and_parallelism(&text, parallel_processes, |progress| {
             let _ = app.emit("analysis-progress", progress);
         })
     })
@@ -239,8 +257,17 @@ pub fn analyze_document_with_progress(
     text: &str,
     on_progress: impl FnMut(AnalysisProgress),
 ) -> Result<AnalysisResult, String> {
+    analyze_document_with_progress_and_parallelism(text, 1, on_progress)
+}
+
+pub fn analyze_document_with_progress_and_parallelism(
+    text: &str,
+    parallel_processes: usize,
+    on_progress: impl FnMut(AnalysisProgress),
+) -> Result<AnalysisResult, String> {
     let rules = compiled_rules().map_err(|error| error.to_string())?;
-    let findings = analyze(text, rules, on_progress).map_err(|error| error.to_string())?;
+    let findings = analyze_with_parallelism(text, rules, parallel_processes, on_progress)
+        .map_err(|error| error.to_string())?;
     Ok(AnalysisResult {
         findings,
         checklist: vec![
@@ -297,6 +324,7 @@ fn load_file_inner(path: &Path) -> AppResult<LoadedDocument> {
         url: None,
         format: format.into(),
         text,
+        preview_html: None,
     })
 }
 
@@ -485,19 +513,19 @@ async fn load_url_inner(input: String) -> AppResult<LoadedDocument> {
             .unwrap_or_default()
             .trim()
             .to_ascii_lowercase();
-        let (title, text, format) = tokio::task::spawn_blocking(move || {
+        let (title, text, format, preview_html) = tokio::task::spawn_blocking(move || {
             let page = decode_web_text(&bytes, &content_type);
-            let (title, text, format) = match media_type.as_str() {
+            let (title, text, format, preview_html) = match media_type.as_str() {
                 "text/html" | "application/xhtml+xml" => {
                     let (title, text) = extract_html_text(&page)?;
-                    (title, text, "html")
+                    (title, text, "html", Some(page))
                 }
-                "text/plain" => (String::new(), normalize_text(&page), "text"),
+                "text/plain" => (String::new(), normalize_text(&page), "text", None),
                 _ => return Err(AppError::UnsupportedWebContent),
             };
             let text = normalize_text(&text);
             check_text(&text)?;
-            Ok::<_, AppError>((title, text, format))
+            Ok::<_, AppError>((title, text, format, preview_html))
         })
         .await
         .map_err(|_| AppError::WorkerFailed)??;
@@ -516,6 +544,7 @@ async fn load_url_inner(input: String) -> AppResult<LoadedDocument> {
             url: Some(current.to_string()),
             format: format.into(),
             text,
+            preview_html,
         });
     }
     Err(AppError::TooManyRedirects)
@@ -557,8 +586,30 @@ fn extract_html_text(html: &str) -> AppResult<(String, String)> {
         .map(|node| normalize_text(&node.text().collect::<String>()))
         .unwrap_or_default();
     let mut raw_text = String::new();
-    for child in document.tree.root().children() {
-        append_html_node(child, &mut raw_text);
+    // Prefer legal document content over the site's navigation and footer.
+    let content_root = [
+        "#doc_content",
+        "#document-content",
+        "[itemprop=\"articleBody\"]",
+        ".document-content",
+        "article",
+        "[role=\"main\"]",
+        "main",
+    ]
+    .iter()
+    .filter_map(|source| Selector::parse(source).ok())
+    .find_map(|selector| {
+        document
+            .select(&selector)
+            .next()
+            .and_then(|element| document.tree.get(element.id()))
+    });
+    if let Some(root) = content_root {
+        append_html_node(root, &mut raw_text);
+    } else {
+        for child in document.tree.root().children() {
+            append_html_node(child, &mut raw_text);
+        }
     }
     let text = normalize_text(&raw_text);
     if text.is_empty() {
@@ -572,6 +623,21 @@ fn append_html_node(node: NodeRef<'_, Node>, output: &mut String) {
         Node::Text(text) => output.push_str(&text.text),
         Node::Element(element) => {
             let name = element.name();
+            let class = element.attr("class").unwrap_or_default().to_lowercase();
+            let id = element.attr("id").unwrap_or_default().to_lowercase();
+            let is_advertisement = [
+                "advertisement",
+                "advertising",
+                "ad-container",
+                "ad-banner",
+                "yandex-rtb",
+                "reklama",
+                "реклама",
+            ]
+            .iter()
+            .any(|marker| class.contains(*marker) || id.contains(*marker))
+                || element.attr("data-ad-slot").is_some()
+                || element.attr("data-google-query-id").is_some();
             if matches!(
                 name,
                 "script" | "style" | "noscript" | "template" | "svg" | "canvas" | "iframe"
@@ -580,6 +646,16 @@ fn append_html_node(node: NodeRef<'_, Node>, output: &mut String) {
                 || element
                     .attr("aria-hidden")
                     .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+                || element.attr("class").is_some_and(|value| {
+                    value.split_ascii_whitespace().any(|class| {
+                        matches!(class, "hide" | "hidden" | "invisible")
+                    })
+                })
+                || element.attr("style").is_some_and(|value| {
+                    let style = value.to_ascii_lowercase().replace(' ', "");
+                    style.contains("display:none") || style.contains("visibility:hidden")
+                })
+                || is_advertisement
             {
                 return;
             }
@@ -1043,67 +1119,150 @@ fn load_rules() -> Result<Vec<CompiledRule>, String> {
 fn analyze(
     text: &str,
     rules: &[CompiledRule],
+    on_progress: impl FnMut(AnalysisProgress),
+) -> AppResult<Vec<Finding>> {
+    analyze_with_parallelism(text, rules, 1, on_progress)
+}
+
+fn analyze_with_parallelism(
+    text: &str,
+    rules: &[CompiledRule],
+    parallel_processes: usize,
     mut on_progress: impl FnMut(AnalysisProgress),
 ) -> AppResult<Vec<Finding>> {
     check_text(text)?;
     let offsets = OffsetMap::new(text);
     let mut findings = Vec::new();
+    let worker_count = parallel_processes
+        .clamp(1, MAX_PARALLEL_PROCESSES)
+        .min(rules.len().max(1));
+    let mut next_rule = 0;
 
-    for (rule_index, rule) in rules.iter().enumerate() {
-        if findings.len() >= MAX_FINDINGS {
-            on_progress(AnalysisProgress {
-                completed_rules: rule_index + 1,
-                total_rules: rules.len(),
-                findings: Vec::new(),
-            });
-            continue;
+    while next_rule < rules.len() {
+        let remaining = MAX_FINDINGS.saturating_sub(findings.len());
+        if remaining == 0 {
+            for rule_index in next_rule..rules.len() {
+                on_progress(AnalysisProgress {
+                    completed_rules: rule_index + 1,
+                    total_rules: rules.len(),
+                    findings: Vec::new(),
+                });
+            }
+            break;
         }
-        let mut seen = HashSet::new();
-        let mut new_findings = Vec::new();
-        for pattern in &rule.patterns {
-            for matched in pattern.find_iter(text) {
-                if seen.insert((matched.start(), matched.end())) {
-                    let start = offsets.at(text, matched.start());
-                    let end = offsets.at(text, matched.end());
-                    let finding = Finding {
-                        id: format!("{}:{start}:{end}", rule.definition.id),
-                        rule_id: rule.definition.id.clone(),
-                        factor: rule.definition.factor.clone(),
-                        title: rule.definition.title.clone(),
-                        excerpt: text[matched.start()..matched.end()].to_string(),
-                        start,
-                        end,
-                        reason: rule.definition.reason.clone(),
-                        confidence: rule.definition.confidence.clone(),
-                        origin: None,
-                        ai_confidence: None,
-                        ai_rationale: None,
-                    };
-                    new_findings.push(finding);
-                    if new_findings.len() >= MAX_FINDINGS_PER_RULE
-                        || findings.len() + new_findings.len() >= MAX_FINDINGS
-                    {
-                        break;
+
+        let batch_size = worker_count.min(rules.len() - next_rule);
+        let can_parallelize = worker_count > 1
+            && batch_size.saturating_mul(MAX_FINDINGS_PER_RULE) <= remaining;
+        let batch_findings = if can_parallelize {
+            thread::scope(|scope| {
+                let offsets = &offsets;
+                let handles = rules[next_rule..next_rule + batch_size]
+                    .iter()
+                    .map(|rule| {
+                        scope.spawn(move || analyze_rule(text, offsets, rule, MAX_FINDINGS_PER_RULE))
+                    })
+                    .collect::<Vec<_>>();
+                let mut results = Vec::with_capacity(handles.len());
+                let mut worker_failed = false;
+                for handle in handles {
+                    match handle.join() {
+                        Ok(result) => results.push(result),
+                        Err(_) => worker_failed = true,
                     }
                 }
-            }
-            if new_findings.len() >= MAX_FINDINGS_PER_RULE
-                || findings.len() + new_findings.len() >= MAX_FINDINGS
-            {
-                break;
-            }
+                if worker_failed {
+                    Err(AppError::WorkerFailed)
+                } else {
+                    Ok(results)
+                }
+            })?
+        } else {
+            vec![analyze_rule(
+                text,
+                &offsets,
+                &rules[next_rule],
+                remaining.min(MAX_FINDINGS_PER_RULE),
+            )]
+        };
+
+        for added in batch_findings {
+            findings.extend(added.iter().cloned());
+            on_progress(AnalysisProgress {
+                completed_rules: next_rule + 1,
+                total_rules: rules.len(),
+                findings: added,
+            });
+            next_rule += 1;
         }
-        findings.extend(new_findings.iter().cloned());
-        on_progress(AnalysisProgress {
-            completed_rules: rule_index + 1,
-            total_rules: rules.len(),
-            findings: new_findings,
-        });
     }
     findings.sort_by(|left, right| {
         (left.start, left.end, &left.rule_id).cmp(&(right.start, right.end, &right.rule_id))
     });
     Ok(findings)
+}
+
+fn analyze_rule(
+    text: &str,
+    offsets: &OffsetMap,
+    rule: &CompiledRule,
+    match_limit: usize,
+) -> Vec<Finding> {
+    let mut seen = HashSet::new();
+    let mut new_findings = Vec::new();
+    for pattern in &rule.patterns {
+        for matched in pattern.find_iter(text) {
+            if seen.insert((matched.start(), matched.end())) {
+                let start = offsets.at(text, matched.start());
+                let end = offsets.at(text, matched.end());
+                let finding = Finding {
+                    id: format!("{}:{start}:{end}", rule.definition.id),
+                    rule_id: rule.definition.id.clone(),
+                    factor: rule.definition.factor.clone(),
+                    title: rule.definition.title.clone(),
+                    excerpt: text[matched.start()..matched.end()].to_string(),
+                    start,
+                    end,
+                    reason: rule.definition.reason.clone(),
+                    confidence: rule.definition.confidence.clone(),
+                    origin: None,
+                    ai_confidence: None,
+                    ai_rationale: None,
+                    ai_rejection_reason: None,
+                };
+                let overlap_indexes = new_findings
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, item)| {
+                        (start < item.end && item.start < end).then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                if overlap_indexes.is_empty() {
+                    new_findings.push(finding);
+                } else {
+                    let mut longest = finding;
+                    for &index in &overlap_indexes {
+                        if new_findings[index].end - new_findings[index].start
+                            > longest.end - longest.start
+                        {
+                            longest = new_findings[index].clone();
+                        }
+                    }
+                    for index in overlap_indexes.into_iter().rev() {
+                        new_findings.remove(index);
+                    }
+                    new_findings.push(longest);
+                }
+                if new_findings.len() >= match_limit {
+                    break;
+                }
+            }
+        }
+        if new_findings.len() >= match_limit {
+            break;
+        }
+    }
+    new_findings
 }
 
 #[derive(Clone, Copy)]
@@ -1142,7 +1301,8 @@ impl OffsetMap {
 
 #[cfg(test)]
 mod tests {
-    use super::{analyze, compiled_rules};
+    use super::{analyze, compiled_rules, extract_html_text, CompiledRule, RuleDefinition};
+    use regex::Regex;
 
     #[test]
     fn housing_code_example_reports_discretion_and_linguistic_uncertainty() {
@@ -1162,6 +1322,48 @@ mod tests {
                 "finding offsets must point to exact preview text"
             );
         }
+    }
+
+    #[test]
+    fn html_analysis_uses_document_content_and_skips_hidden_site_chrome() {
+        let html = r#"
+            <html><head><title>Страница</title></head><body>
+              <nav>Навигация сайта</nav>
+              <main><article><h1>Заголовок</h1>
+                <div id="doc_content"><p>Текст нормативного акта.</p>
+                  <div class="popup-social hide">РЕКЛАМА</div>
+                </div>
+              </article></main>
+              <footer>Реклама на портале</footer>
+            </body></html>
+        "#;
+        let (_, text) = extract_html_text(html).unwrap();
+
+        assert!(text.contains("Текст нормативного акта."));
+        assert!(!text.contains("Навигация сайта"));
+        assert!(!text.contains("РЕКЛАМА"));
+        assert!(!text.contains("Реклама на портале"));
+    }
+
+    #[test]
+    fn overlapping_patterns_for_one_rule_keep_only_the_longest_match() {
+        let short = Regex::new("abc|def").unwrap();
+        let long = Regex::new("bcde").unwrap();
+        let rule = CompiledRule {
+            definition: RuleDefinition {
+                id: "TEST-REF".into(),
+                title: "Тестовая отсылка".into(),
+                factor: "Тест".into(),
+                reason: "Проверка".into(),
+                confidence: "Низкая".into(),
+                patterns: vec!["abc|def".into(), "bcde".into()],
+            },
+            patterns: vec![short, long],
+        };
+        let findings = analyze("abcdef", &[rule], |_| {}).unwrap();
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].excerpt, "bcde");
     }
 
     fn byte_at_utf16(text: &str, offset: usize) -> usize {

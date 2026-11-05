@@ -30,8 +30,8 @@
 
         <button class="settings-button" id="openSettings" type="button" aria-label="Настройки" title="Настройки">
           <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" />
-            <path d="m19.4 15 .1.1a2 2 0 1 1-2.8 2.8l-.1-.1a2 2 0 0 0-3.4 1.4v.2a2 2 0 1 1-4 0v-.2a2 2 0 0 0-3.4-1.4l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a2 2 0 0 0-1.4-3.4h-.2a2 2 0 1 1 0-4h.2a2 2 0 0 0 1.4-3.4l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a2 2 0 0 0 3.4-1.4v-.2a2 2 0 1 1 4 0v.2a2 2 0 0 0 3.4 1.4l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a2 2 0 0 0 1.4 3.4h.2a2 2 0 1 1 0 4h-.2a2 2 0 0 0-1.4 3.4Z" />
+            <path d="M21 4h-7M10 4H3m18 8h-9m-4 0H3m18 8h-5m-4 0H3" />
+            <path d="M14 2v4M8 10v4m8 4v4" />
           </svg>
         </button>
 
@@ -56,7 +56,7 @@
               <span>Файл</span>
             </button>
           </section>
-          <p class="start-note">Инструмент предварительного анализа. Итоговое решение принимает человек.</p>
+          <p class="start-note">Инструмент предварительного анализа. Итоговое решение должен принимать человек.</p>
 
           <div class="start-loading" id="startLoading" hidden aria-live="polite">
             <span class="spinner" aria-hidden="true"></span>
@@ -69,7 +69,7 @@
         <form class="modal-card" id="urlForm">
           <div class="modal-heading">
             <h2 id="urlDialogTitle">Ссылка на документ</h2>
-            <button class="modal-close" id="closeUrlDialog" type="button" aria-label="Закрыть">×</button>
+            <button class="modal-close" id="closeUrlDialog" type="button" aria-label="Закрыть"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg></button>
           </div>
           <label class="visually-hidden" for="urlInput">Публичная ссылка</label>
           <input
@@ -94,7 +94,7 @@
         <div class="modal-card">
           <div class="modal-heading">
             <h2 id="fileDialogTitle">Добавить документ</h2>
-            <button class="modal-close" id="closeFileDialog" type="button" aria-label="Закрыть">×</button>
+            <button class="modal-close" id="closeFileDialog" type="button" aria-label="Закрыть"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg></button>
           </div>
           <div class="file-dropzone" id="fileDropzone">
             <svg viewBox="0 0 28 28" aria-hidden="true"><path d="M14 19V4m0 0L8.5 9.5M14 4l5.5 5.5M5 17v7h18v-7" /></svg>
@@ -111,9 +111,9 @@
         <div class="modal-card">
           <div class="modal-heading">
             <h2 id="settingsTitle">Настройки</h2>
-            <button class="modal-close" id="closeSettings" type="button" aria-label="Закрыть">×</button>
+            <button class="modal-close" id="closeSettings" type="button" aria-label="Закрыть"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg></button>
           </div>
-          <fieldset class="settings-theme">
+          <fieldset class="settings-group settings-theme">
             <legend>Цветовая тема</legend>
             <div class="settings-modal-options">
               <label class="theme-choice">
@@ -126,42 +126,108 @@
               </label>
             </div>
           </fieldset>
-          <section class="settings-codex" aria-labelledby="codexSettingsTitle">
-            <h3 id="codexSettingsTitle">Проверка Codex</h3>
+          <section class="settings-group settings-analysis" aria-labelledby="analysisSettingsTitle">
+            <h3 id="analysisSettingsTitle">Анализ</h3>
+            <label class="codex-field" for="parallelProcesses">
+              <span>Количество параллельных процессов</span>
+              <select class="modal-input codex-select" id="parallelProcesses">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+              </select>
+            </label>
+          </section>
+          <section class="settings-group settings-preview" aria-labelledby="previewSettingsTitle">
+            <h3 id="previewSettingsTitle">Превью страницы</h3>
+            <label class="preview-opt-in">
+              <input id="filterAdsInPreview" type="checkbox" />
+              <span>Фильтровать рекламу в превью</span>
+            </label>
+            <p class="preview-note">Встроенный фильтр скрывает очевидные рекламные блоки. Расширение uBlock Origin в этом превью недоступно.</p>
+          </section>
+          <section class="settings-group settings-codex" aria-labelledby="codexSettingsTitle">
+            <h3 id="codexSettingsTitle">Проверка с помощью ИИ</h3>
             <label class="codex-opt-in">
               <input id="codexEnabled" type="checkbox" />
-              <span>Добавлять проверку Codex после локального анализа</span>
+              <span>Добавлять проверку с помощью ИИ после локального анализа</span>
             </label>
-            <p class="codex-privacy-note">При включении текст документа и найденные сигналы отправляются через ваш аккаунт Codex.</p>
+            <p class="codex-privacy-note">При включении текст документа и найденные сигналы будут передаваться выбранному провайдеру.</p>
+            <div class="codex-options" id="codexOptions" hidden>
+              <label class="codex-field" for="codexProvider">
+                <span>Провайдер</span>
+                <select class="modal-input codex-select" id="codexProvider">
+                  <option value="codex">ChatGPT (Codex)</option>
+                </select>
+              </label>
+              <label class="codex-field" for="codexModel">
+                <span>Модель</span>
+                <select class="modal-input codex-select" id="codexModel">
+                  <option value="gpt-6-luna">gpt-6-luna</option>
+                  <option value="gpt-6.1-sol">gpt-6.1-sol</option>
+                  <option value="gpt-6-astra">gpt-6-astra</option>
+                </select>
+              </label>
+              <label class="codex-field" for="codexReasoning">
+                <span>Уровень рассуждения</span>
+                <select class="modal-input codex-select" id="codexReasoning">
+                  <option value="low">Низкое</option>
+                  <option value="medium">Среднее</option>
+                  <option value="high">Высокое</option>
+                </select>
+              </label>
 
-            <label class="codex-field" for="codexProvider">
-              <span>Провайдер</span>
-              <select class="modal-input codex-select" id="codexProvider">
-                <option value="codex">Codex</option>
-              </select>
-            </label>
-            <label class="codex-field" for="codexModel">
-              <span>Модель</span>
-              <select class="modal-input codex-select" id="codexModel" disabled>
-                <option value="gpt-6-luna">gpt-6-luna</option>
-                <option value="gpt-6.1-sol">gpt-6.1-sol</option>
-                <option value="gpt-6-astra">gpt-6-astra</option>
-              </select>
-            </label>
-            <label class="codex-field" for="codexReasoning">
-              <span>Усилие рассуждения</span>
-              <select class="modal-input codex-select" id="codexReasoning" disabled>
-                <option value="low">Низкое</option>
-                <option value="medium">Среднее</option>
-                <option value="high">Высокое</option>
-              </select>
-            </label>
-
-            <div class="codex-status-row">
-              <p id="codexStatus" role="status" aria-live="polite">Статус Codex ещё не проверен.</p>
-              <button class="button button-secondary" id="checkCodexStatus" type="button">Проверить</button>
+              <div class="codex-status-row">
+                <p id="codexStatus" role="status" aria-live="polite">Статус Codex ещё не проверен.</p>
+                <button class="button button-secondary" id="checkCodexStatus" type="button">Проверить</button>
+              </div>
             </div>
           </section>
+        </div>
+      </dialog>
+
+      <dialog class="modal ai-review-modal" id="aiReviewDialog" aria-labelledby="aiReviewTitle">
+        <div class="modal-card">
+          <div class="modal-heading">
+            <h2 id="aiReviewTitle">Проверка ChatGPT (Codex)</h2>
+            <button class="modal-close" id="closeAiReview" type="button" aria-label="Закрыть">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
+            </button>
+          </div>
+          <div class="ai-review-content">
+            <section class="ai-review-section" aria-labelledby="aiReviewInputTitle">
+              <h3 id="aiReviewInputTitle">1. Входные данные</h3>
+              <p class="ai-review-mode" id="aiReviewMode"></p>
+              <dl class="ai-review-meta">
+                <div><dt>Источник</dt><dd id="aiReviewSourceName"></dd></div>
+                <div><dt>Правило</dt><dd id="aiReviewRule"></dd></div>
+                <div><dt>Фактор</dt><dd id="aiReviewFactor"></dd></div>
+                <div><dt>Основание правила</dt><dd id="aiReviewRuleReason"></dd></div>
+              </dl>
+              <div class="ai-review-source">
+                <h4>Фрагмент источника</h4>
+                <blockquote id="aiReviewExcerpt"></blockquote>
+                <p class="ai-review-context-label" id="aiReviewContextLabel"></p>
+                <pre id="aiReviewContext"></pre>
+              </div>
+              <details class="ai-review-document" id="aiReviewDocumentDetails" hidden>
+                <summary id="aiReviewDocumentSummary">Текст документа</summary>
+                <pre id="aiReviewDocumentText"></pre>
+              </details>
+            </section>
+            <section class="ai-review-section" aria-labelledby="aiReviewReasoningTitle">
+              <h3 id="aiReviewReasoningTitle">2. Обоснование</h3>
+              <p class="ai-review-rationale" id="aiReviewRationale"></p>
+            </section>
+            <section class="ai-review-section" aria-labelledby="aiReviewResultTitle">
+              <h3 id="aiReviewResultTitle">3. Результат</h3>
+              <div class="ai-review-result" id="aiReviewResult">
+                <span class="confidence-indicator" id="aiReviewConfidenceMark" aria-hidden="true"></span>
+                <strong id="aiReviewConfidence"></strong>
+              </div>
+              <p class="ai-review-decision" id="aiReviewDecision"></p>
+            </section>
+          </div>
         </div>
       </dialog>
 
@@ -174,7 +240,7 @@
                   <iframe
                     id="pageFrame"
                     title="Исходная страница"
-                    sandbox=""
+                    sandbox="allow-same-origin"
                     referrerpolicy="no-referrer"
                     hidden
                   ></iframe>
@@ -183,8 +249,8 @@
                     <span>Открываем страницу…</span>
                   </div>
                   <div class="page-error page-overlay" id="pageError" role="alert" hidden>
-                    <h2>Сайт не разрешил показ во встроенном окне</h2>
-                    <p>Можно открыть исходную страницу в браузере.</p>
+                    <h2>Предпросмотр недоступен</h2>
+                    <p>Откройте оригинал в браузере.</p>
                     <button class="button button-secondary" id="openOriginal" type="button" hidden>
                       Открыть в браузере
                     </button>
@@ -206,17 +272,47 @@
 
           <aside class="findings-pane" aria-labelledby="findingsHeading">
             <div class="panel-heading findings-heading">
-              <div>
+              <div class="findings-heading-title">
                 <h2 id="findingsHeading">Сигналы для проверки</h2>
+                <p class="ai-analysis-note" id="aiAnalysisNote" role="status" aria-live="polite" hidden></p>
+                <button class="button button-secondary ai-retry-button" id="retryAiAnalysis" type="button" hidden>
+                  Перезапустить анализ
+                </button>
               </div>
               <div class="findings-heading-tools">
                 <span class="spinner analysis-spinner" id="analysisStatus" role="status" aria-label="Идёт анализ" aria-live="polite" hidden></span>
                 <span class="result-count" id="resultCount">—</span>
+                <details class="confidence-legend">
+                  <summary class="confidence-legend-trigger" aria-label="Пояснение цветов уверенности">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 7.5h.01" /></svg>
+                  </summary>
+                  <ul class="confidence-legend-popover">
+                    <li class="confidence-legend-item" data-confidence="high">А = Вероятнее всего нарушение</li>
+                    <li class="confidence-legend-item" data-confidence="medium">Б = Вероятно нарушение</li>
+                    <li class="confidence-legend-item" data-confidence="low">В = Возможно нарушение</li>
+                    <li class="confidence-legend-item" data-confidence="likely-false">× = Сигнал не подтверждён</li>
+                    <li class="confidence-legend-item" data-confidence="unknown">? = Уровень не указан</li>
+                  </ul>
+                </details>
               </div>
             </div>
 
+            <div class="analysis-progress" id="analysisProgress" hidden>
+              <div
+                class="analysis-progress-track"
+                id="analysisProgressBar"
+                role="progressbar"
+                aria-label="Ход анализа"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow="0"
+              >
+                <span class="analysis-progress-fill" id="analysisProgressFill"></span>
+              </div>
+              <ol class="analysis-progress-steps" id="analysisProgressSteps" aria-label="Этапы анализа"></ol>
+            </div>
+
             <div class="findings-content">
-              <p class="ai-analysis-note" id="aiAnalysisNote" role="status" aria-live="polite" hidden></p>
               <p class="state-message" id="findingsMessage" aria-live="polite" aria-atomic="true">
                 Результаты появятся после загрузки источника.
               </p>
