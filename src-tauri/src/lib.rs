@@ -1296,6 +1296,31 @@ mod tests {
     use regex::Regex;
 
     #[test]
+    fn risk_rule_catalog_compiles_and_matches_cyrillic_domains() {
+        let text = "Закупки налоговым антимонопольные банкротства несостоятельность рекламный таможня валютный контроль";
+        let findings = analyze(text, compiled_rules().unwrap(), |_| {}).unwrap();
+        let risk_excerpts = [
+            "Закупки",
+            "налоговым",
+            "антимонопольные",
+            "банкротства",
+            "несостоятельность",
+            "рекламный",
+            "таможня",
+            "валютный контроль",
+        ];
+
+        for excerpt in risk_excerpts {
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule_id == "AE-RISK-01" && finding.excerpt == excerpt),
+                "AE-RISK-01 should detect {excerpt:?}"
+            );
+        }
+    }
+
+    #[test]
     fn housing_code_example_reports_discretion_and_linguistic_uncertainty() {
         let text = include_str!("../../fixtures/housing-code-162-part-12.txt");
         let findings = analyze(text, compiled_rules().unwrap(), |_| {}).unwrap();

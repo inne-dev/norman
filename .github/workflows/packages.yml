@@ -77,6 +77,10 @@ jobs:
 
       - run: npm ci
 
+      - name: Verify rule catalog regression
+        if: runner.os == 'Linux'
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml risk_rule_catalog_compiles_and_matches_cyrillic_domains
+
       - name: Build ${{ matrix.bundle }} package
         run: npm run tauri build -- ${{ matrix.build-args }}
 

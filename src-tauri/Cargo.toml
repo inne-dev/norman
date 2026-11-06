@@ -1,6 +1,6 @@
 [package]
 name = "norman"
-version = "0.1.0"
+version = "0.1.1"
 description = "Локальная первичная проверка нормативных актов"
 authors = ["Норман"]
 edition = "2021"
