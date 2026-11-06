@@ -1125,21 +1125,40 @@ function renderProgress() {
   ui.analysisProgress.dataset.state = stages.every((stage) => stage.status === 'complete') ? 'complete' : 'running';
   ui.analysisProgressBar.setAttribute('aria-valuenow', String(percentage));
   ui.analysisProgressBar.setAttribute('aria-valuetext', `${percentage}%`);
-  ui.analysisProgressFill.style.width = `${percentage}%`;
+  ui.analysisProgressFill.style.width = '100%';
+  ui.analysisProgressFill.replaceChildren(...stages.map((stage) => {
+    const segment = document.createElement('span');
+    segment.className = 'analysis-progress-segment';
+    segment.dataset.state = stage.status;
+    segment.setAttribute('aria-hidden', 'true');
+    return segment;
+  }));
   const focusedStep = ui.analysisProgressSteps.contains(document.activeElement)
     ? Array.from(ui.analysisProgressSteps.children).indexOf(document.activeElement)
     : -1;
+  const statusLabels = {
+    complete: 'Завершено',
+    running: 'Выполняется',
+    pending: 'Ожидает',
+    error: 'Ошибка',
+    skipped: 'Пропущено',
+  };
   ui.analysisProgressSteps.replaceChildren(...stages.map((stage, index) => {
     const item = document.createElement('li');
     item.className = 'analysis-step';
     item.dataset.state = stage.status;
     item.tabIndex = 0;
+    item.setAttribute('aria-label', `${stage.label}: ${statusLabels[stage.status]}`);
     const tooltipId = `analysisStepTooltip${index + 1}`;
     item.setAttribute('aria-describedby', tooltipId);
     const mark = document.createElement('span');
     mark.className = 'analysis-step-mark';
     mark.setAttribute('aria-hidden', 'true');
-    mark.textContent = stage.status === 'complete' ? '✓' : stage.status === 'error' ? '!' : stage.status === 'skipped' ? '–' : '';
+    if (index < stages.length - 1) {
+      mark.dataset.state = stage.status === 'complete' ? 'complete' : 'pending';
+    } else {
+      mark.hidden = true;
+    }
     const label = document.createElement('span');
     label.className = 'analysis-step-label';
     label.textContent = stage.label;
