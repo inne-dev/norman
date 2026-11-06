@@ -1570,26 +1570,42 @@ p {
   left: 0;
   height: 4px;
   overflow: hidden;
-  background: var(--line-soft);
   border-radius: 999px;
   transform: translateY(-50%);
 }
 
 .analysis-progress-fill {
-  display: block;
-  width: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: 100%;
   height: 100%;
-  background: var(--confidence-medium);
   border-radius: inherit;
-  transition: width 200ms ease-out, background-color 200ms ease-out;
+  overflow: hidden;
 }
 
-.analysis-progress[data-state="complete"] .analysis-progress-fill {
+.analysis-progress-segment {
+  display: block;
+  min-width: 0;
+  height: 100%;
+  background: var(--line-soft);
+  transition: background-color 200ms ease-out;
+}
+
+.analysis-progress-segment[data-state="complete"] {
   background: var(--text-inline-success);
+}
+
+.analysis-progress-segment[data-state="running"] {
+  background: var(--confidence-medium);
+}
+
+.analysis-progress-segment[data-state="error"] {
+  background: var(--text-inline-error);
 }
 
 .analysis-progress-steps {
   position: relative;
+  z-index: 1;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: center;
@@ -1605,7 +1621,7 @@ p {
   min-width: 0;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-end;
   cursor: help;
 }
 
@@ -1616,23 +1632,24 @@ p {
 }
 
 .analysis-step-mark {
-  width: 12px;
-  height: 12px;
-  flex: 0 0 12px;
+  position: relative;
+  z-index: 1;
+  width: 10px;
+  height: 10px;
+  flex: 0 0 10px;
   border: 1px solid var(--line-strong);
   border-radius: 50%;
   background: var(--line-strong);
+  transform: translateX(50%);
 }
 
-.analysis-step[data-state="complete"] .analysis-step-mark {
+.analysis-step-mark[hidden] {
+  display: none;
+}
+
+.analysis-step-mark[data-state="complete"] {
   background: var(--text-inline-success);
   border-color: var(--text-inline-success);
-}
-
-.analysis-step[data-state="running"] .analysis-step-mark,
-.analysis-step[data-state="error"] .analysis-step-mark {
-  background: var(--confidence-medium);
-  border-color: var(--confidence-medium);
 }
 
 .analysis-step-label {
@@ -1688,7 +1705,7 @@ p {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .analysis-progress-fill {
+  .analysis-progress-segment {
     transition: none;
   }
 }
