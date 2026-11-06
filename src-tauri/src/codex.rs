@@ -1112,7 +1112,7 @@ fn build_codex_command(args: &[OsString], working_dir: &Path) -> Result<Command,
     {
         let arguments = args
             .iter()
-            .map(cmd_safe_argument)
+            .map(|argument| cmd_safe_argument(argument.as_os_str()))
             .collect::<Result<Vec<_>, _>>()?;
         let command_line = format!("call codex.cmd {}", arguments.join(" "));
         let mut command = Command::new(cmd_interpreter());
