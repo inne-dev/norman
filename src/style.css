@@ -1580,6 +1580,10 @@ p {
   cursor: help;
 }
 
+.analysis-step:last-child {
+  padding-right: 5px;
+}
+
 .analysis-step:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
