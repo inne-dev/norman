@@ -1248,8 +1248,9 @@ fn codex_search_directories() -> Vec<PathBuf> {
             directories.push(PathBuf::from(appdata).join("npm"));
         }
         if let Some(local_appdata) = env::var_os("LOCALAPPDATA") {
-            directories.push(PathBuf::from(local_appdata).join("Programs/Codex"));
-            directories.push(PathBuf::from(local_appdata).join("Programs/nodejs"));
+            let local_appdata = PathBuf::from(local_appdata);
+            directories.push(local_appdata.join("Programs/Codex"));
+            directories.push(local_appdata.join("Programs/nodejs"));
         }
     }
     if let Some(path) = env::var_os("PATH") {
