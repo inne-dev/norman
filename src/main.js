@@ -85,20 +85,8 @@ const ui = {
   closeSettings: document.querySelector('#closeSettings'),
   aiReviewDialog: document.querySelector('#aiReviewDialog'),
   closeAiReview: document.querySelector('#closeAiReview'),
-  aiReviewMode: document.querySelector('#aiReviewMode'),
-  aiReviewSourceName: document.querySelector('#aiReviewSourceName'),
-  aiReviewRule: document.querySelector('#aiReviewRule'),
-  aiReviewFactor: document.querySelector('#aiReviewFactor'),
-  aiReviewRuleReason: document.querySelector('#aiReviewRuleReason'),
   aiReviewExcerpt: document.querySelector('#aiReviewExcerpt'),
-  aiReviewContextLabel: document.querySelector('#aiReviewContextLabel'),
-  aiReviewContext: document.querySelector('#aiReviewContext'),
-  aiReviewDocumentDetails: document.querySelector('#aiReviewDocumentDetails'),
-  aiReviewDocumentSummary: document.querySelector('#aiReviewDocumentSummary'),
-  aiReviewDocumentText: document.querySelector('#aiReviewDocumentText'),
   aiReviewRationale: document.querySelector('#aiReviewRationale'),
-  aiReviewResult: document.querySelector('#aiReviewResult'),
-  aiReviewConfidenceMark: document.querySelector('#aiReviewConfidenceMark'),
   aiReviewConfidence: document.querySelector('#aiReviewConfidence'),
   aiReviewDecision: document.querySelector('#aiReviewDecision'),
   codexEnabled: document.querySelector('#codexEnabled'),
@@ -1082,6 +1070,12 @@ function renderProgress() {
   const totalRules = Number(ruleProgress.totalRules ?? ruleProgress.total_rules);
   const completed = Number(aiProgress.completed);
   const total = Number(aiProgress.total);
+  const ruleFraction = Number.isFinite(completedRules) && totalRules > 0
+    ? Math.max(0, Math.min(1, completedRules / totalRules))
+    : 0;
+  const aiFraction = Number.isFinite(completed) && total > 0
+    ? Math.max(0, Math.min(1, completed / total))
+    : 0;
   const localDone = state.analysis === 'done' || state.aiAnalysis !== 'idle';
   const localStatus = localDone
     ? 'complete'
@@ -1101,41 +1095,50 @@ function renderProgress() {
       label: 'Текст',
       description: 'Текст документа проверяется по локальному каталогу правил.',
       status: localStatus,
-      progress: Number.isFinite(completedRules) && totalRules > 0 ? Math.min(1, completedRules / totalRules) : 0.05,
+      progress: localStatus === 'complete' ? 1 : ruleFraction,
     },
     {
       label: 'Контекст',
       description: 'Проверяется контекст каждого найденного сигнала.',
       status: contextStatus,
-      progress: Number.isFinite(completed) && total > 0 ? Math.min(1, completed / total) : state.aiAnalysis === 'checking' ? 0.03 : 0.05,
+      progress: contextStatus === 'complete' ? 1 : phase === 'verify' ? aiFraction : 0,
     },
     {
       label: 'Весь текст',
       description: 'Документ целиком проверяется на дополнительные сигналы.',
       status: globalStatus,
-      progress: Number.isFinite(completed) && total > 0 ? Math.min(1, completed / total) : 0.05,
+      progress: globalStatus === 'complete' ? 1 : phase === 'discover' ? aiFraction : 0,
     },
   ];
 
-  const terminal = (status) => status === 'complete' || status === 'error' || status === 'skipped';
-  let fraction = stages.filter((stage) => terminal(stage.status)).length;
-  const active = stages.find((stage) => stage.status === 'running');
-  if (active) fraction += active.progress;
-  const percentage = Math.round((fraction / stages.length) * 100);
-  ui.analysisProgress.dataset.state = stages.every((stage) => stage.status === 'complete') ? 'complete' : 'running';
+  const percentage = Math.round(stages.reduce((sum, stage) => sum + stage.progress, 0) / stages.length * 100);
+  const hasError = stages.some((stage) => stage.status === 'error');
+  ui.analysisProgress.dataset.state = stages.every((stage) => stage.status === 'complete')
+    ? 'complete'
+    : hasError ? 'error' : 'running';
   ui.analysisProgressBar.setAttribute('aria-valuenow', String(percentage));
   ui.analysisProgressBar.setAttribute('aria-valuetext', `${percentage}%`);
-  ui.analysisProgressFill.style.width = '100%';
-  ui.analysisProgressFill.replaceChildren(...stages.map((stage) => {
-    const segment = document.createElement('span');
-    segment.className = 'analysis-progress-segment';
-    segment.dataset.state = stage.status;
-    segment.setAttribute('aria-hidden', 'true');
-    return segment;
-  }));
   const focusedStep = ui.analysisProgressSteps.contains(document.activeElement)
     ? Array.from(ui.analysisProgressSteps.children).indexOf(document.activeElement)
     : -1;
+  let segments = Array.from(ui.analysisProgressFill.children);
+  if (segments.length !== stages.length) {
+    segments = stages.map(() => {
+      const segment = document.createElement('span');
+      segment.className = 'analysis-progress-segment';
+      segment.setAttribute('aria-hidden', 'true');
+      const fill = document.createElement('span');
+      fill.className = 'analysis-progress-segment-fill';
+      segment.append(fill);
+      return segment;
+    });
+    ui.analysisProgressFill.replaceChildren(...segments);
+  }
+  stages.forEach((stage, index) => {
+    segments[index].dataset.state = stage.status;
+    segments[index].firstElementChild.style.width = `${stage.progress * 100}%`;
+  });
+
   const statusLabels = {
     complete: 'Завершено',
     running: 'Выполняется',
@@ -1143,33 +1146,49 @@ function renderProgress() {
     error: 'Ошибка',
     skipped: 'Пропущено',
   };
-  ui.analysisProgressSteps.replaceChildren(...stages.map((stage, index) => {
-    const item = document.createElement('li');
-    item.className = 'analysis-step';
-    item.dataset.state = stage.status;
-    item.tabIndex = 0;
-    item.setAttribute('aria-label', `${stage.label}: ${statusLabels[stage.status]}`);
-    const tooltipId = `analysisStepTooltip${index + 1}`;
-    item.setAttribute('aria-describedby', tooltipId);
-    const mark = document.createElement('span');
-    mark.className = 'analysis-step-mark';
-    mark.setAttribute('aria-hidden', 'true');
-    if (index < stages.length - 1) {
-      mark.dataset.state = stage.status === 'complete' ? 'complete' : 'pending';
-    } else {
-      mark.hidden = true;
+  let steps = Array.from(ui.analysisProgressSteps.children);
+  if (steps.length !== stages.length) {
+    steps = stages.map((stage, index) => {
+      const item = document.createElement('li');
+      item.className = 'analysis-step';
+      item.tabIndex = 0;
+      const mark = document.createElement('span');
+      mark.className = 'analysis-step-mark';
+      mark.setAttribute('aria-hidden', 'true');
+      const label = document.createElement('span');
+      label.className = 'analysis-step-label';
+      const tooltip = document.createElement('span');
+      tooltip.className = 'analysis-step-tooltip';
+      tooltip.id = `analysisStepTooltip${index + 1}`;
+      tooltip.setAttribute('role', 'tooltip');
+      item.append(mark, label, tooltip);
+      item.dataset.initialized = 'false';
+      item.dataset.completed = String(stage.status === 'complete');
+      return item;
+    });
+    ui.analysisProgressSteps.replaceChildren(...steps);
+  }
+  stages.forEach((stage, index) => {
+    const item = steps[index];
+    const [mark, label, tooltip] = item.children;
+    const isComplete = stage.status === 'complete';
+    const wasComplete = item.dataset.completed === 'true';
+    if (item.dataset.initialized === 'true' && isComplete && !wasComplete) {
+      mark.classList.remove('is-completing');
+      void mark.offsetWidth;
+      mark.classList.add('is-completing');
+    } else if (!isComplete) {
+      mark.classList.remove('is-completing');
     }
-    const label = document.createElement('span');
-    label.className = 'analysis-step-label';
+    item.dataset.state = stage.status;
+    item.dataset.completed = String(isComplete);
+    item.dataset.initialized = 'true';
+    item.setAttribute('aria-label', `${stage.label}: ${statusLabels[stage.status]}`);
+    item.setAttribute('aria-describedby', tooltip.id);
+    mark.dataset.state = isComplete ? 'complete' : 'pending';
     label.textContent = stage.label;
-    const tooltip = document.createElement('span');
-    tooltip.className = 'analysis-step-tooltip';
-    tooltip.id = tooltipId;
-    tooltip.setAttribute('role', 'tooltip');
     tooltip.textContent = stage.description;
-    item.append(mark, label, tooltip);
-    return item;
-  }));
+  });
   if (focusedStep >= 0) ui.analysisProgressSteps.children[focusedStep]?.focus({ preventScroll: true });
 }
 
@@ -1238,39 +1257,13 @@ function findingRowData(finding) {
   };
 }
 
-function findingContextWindow(finding, padding = 800) {
-  const text = state.document?.text || '';
-  if (!isValidFinding(finding) || text.slice(finding.start, finding.end) !== finding.excerpt) return finding.excerpt || '';
-
-  let start = finding.start;
-  let leftCount = 0;
-  while (start > 0 && leftCount < padding) {
-    start -= 1;
-    const current = text.charCodeAt(start);
-    if (current >= 0xdc00 && current <= 0xdfff && start > 0) {
-      const previous = text.charCodeAt(start - 1);
-      if (previous >= 0xd800 && previous <= 0xdbff) start -= 1;
-    }
-    leftCount += 1;
-  }
-
-  let end = finding.end;
-  let rightCount = 0;
-  while (end < text.length && rightCount < padding) {
-    const codePoint = text.codePointAt(end);
-    end += codePoint > 0xffff ? 2 : 1;
-    rightCount += 1;
-  }
-  return text.slice(start, end);
-}
-
 function aiReviewConfidenceLabel(value) {
   return ({
-    high: 'Вероятнее всего нарушение',
-    medium: 'Вероятно нарушение',
-    low: 'Возможно нарушение',
-    'likely-false': 'Сигнал отсеян',
-    unknown: 'Уровень не указан',
+    high: 'Высокая уверенность',
+    medium: 'Средняя уверенность',
+    low: 'Низкая уверенность',
+    'likely-false': 'Сигнал не подтверждён',
+    unknown: 'Уверенность не указана',
   })[aiConfidenceLevel(value)];
 }
 
@@ -1278,42 +1271,15 @@ function openAiReview(key) {
   const index = state.findings.findIndex((finding, itemIndex) => findingKey(finding, itemIndex) === key);
   if (index < 0) return;
   const finding = state.findings[index];
-  const globalAnalysis = String(finding.origin || '').toLocaleLowerCase() === 'codex';
   const confidence = aiConfidenceLevel(finding.aiConfidence);
-  const sourceText = state.document?.text || '';
-  const documentTextLimit = 20_000;
-
-  ui.aiReviewMode.textContent = globalAnalysis
-    ? 'Глобальный анализ всего текста для поиска новых сигналов.'
-    : 'Проверка найденного сигнала по фрагменту, контексту и правилу.';
-  ui.aiReviewSourceName.textContent = state.document?.title || state.document?.url || 'Источник';
-  ui.aiReviewRule.textContent = finding.ruleId || 'Не указано';
-  ui.aiReviewFactor.textContent = finding.factor || 'Не указан';
-  ui.aiReviewRuleReason.textContent = finding.reason || 'Не указано';
   ui.aiReviewExcerpt.textContent = finding.excerpt || 'Фрагмент не сохранён.';
-
-  const context = globalAnalysis ? '' : findingContextWindow(finding);
-  ui.aiReviewContextLabel.hidden = !context || context === finding.excerpt;
-  ui.aiReviewContextLabel.textContent = 'Контекст источника (до 800 символов до и после фрагмента)';
-  ui.aiReviewContext.hidden = !context || context === finding.excerpt;
-  ui.aiReviewContext.textContent = context;
-
-  ui.aiReviewDocumentDetails.hidden = !globalAnalysis || !sourceText;
-  ui.aiReviewDocumentDetails.open = globalAnalysis;
-  ui.aiReviewDocumentSummary.textContent = sourceText.length > documentTextLimit
-    ? `Текст документа · показано ${documentTextLimit.toLocaleString('ru-RU')} из ${sourceText.length.toLocaleString('ru-RU')} символов`
-    : `Текст документа · ${sourceText.length.toLocaleString('ru-RU')} символов`;
-  ui.aiReviewDocumentText.textContent = sourceText.length > documentTextLimit
-    ? `${sourceText.slice(0, documentTextLimit)}\n…`
-    : sourceText;
-
-  ui.aiReviewRationale.textContent = finding.aiRationale || 'Краткое обоснование не сохранено.';
-  ui.aiReviewResult.dataset.confidence = confidence;
-  ui.aiReviewConfidenceMark.textContent = findingConfidenceMarker(confidence);
+  ui.aiReviewRationale.textContent = (confidence === 'likely-false' && finding.aiRejectionReason)
+    || finding.aiRationale
+    || 'Краткое обоснование не сохранено.';
   ui.aiReviewConfidence.textContent = aiReviewConfidenceLabel(finding.aiConfidence);
   ui.aiReviewDecision.textContent = confidence === 'likely-false'
-    ? `Сигнал отсеян. ${finding.aiRejectionReason || ''}`.trim()
-    : 'Сигнал оставлен для экспертной проверки.';
+    ? 'Codex не подтвердил сигнал; при необходимости его можно проверить вручную.'
+    : 'Возможный сигнал; требуется экспертная проверка.';
   ui.aiReviewDialog.showModal();
 }
 

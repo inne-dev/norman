@@ -189,40 +189,23 @@
       <dialog class="modal ai-review-modal" id="aiReviewDialog" aria-labelledby="aiReviewTitle">
         <div class="modal-card">
           <div class="modal-heading">
-            <h2 id="aiReviewTitle">Проверка ChatGPT (Codex)</h2>
+            <h2 id="aiReviewTitle">Оценка Codex</h2>
             <button class="modal-close" id="closeAiReview" type="button" aria-label="Закрыть">
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
             </button>
           </div>
           <div class="ai-review-content">
             <section class="ai-review-section" aria-labelledby="aiReviewInputTitle">
-              <h3 id="aiReviewInputTitle">1. Входные данные</h3>
-              <p class="ai-review-mode" id="aiReviewMode"></p>
-              <dl class="ai-review-meta">
-                <div><dt>Источник</dt><dd id="aiReviewSourceName"></dd></div>
-                <div><dt>Правило</dt><dd id="aiReviewRule"></dd></div>
-                <div><dt>Фактор</dt><dd id="aiReviewFactor"></dd></div>
-                <div><dt>Основание правила</dt><dd id="aiReviewRuleReason"></dd></div>
-              </dl>
-              <div class="ai-review-source">
-                <h4>Фрагмент источника</h4>
-                <blockquote id="aiReviewExcerpt"></blockquote>
-                <p class="ai-review-context-label" id="aiReviewContextLabel"></p>
-                <pre id="aiReviewContext"></pre>
-              </div>
-              <details class="ai-review-document" id="aiReviewDocumentDetails" hidden>
-                <summary id="aiReviewDocumentSummary">Текст документа</summary>
-                <pre id="aiReviewDocumentText"></pre>
-              </details>
+              <h3 id="aiReviewInputTitle">Фрагмент источника</h3>
+              <blockquote class="ai-review-excerpt" id="aiReviewExcerpt"></blockquote>
             </section>
             <section class="ai-review-section" aria-labelledby="aiReviewReasoningTitle">
-              <h3 id="aiReviewReasoningTitle">2. Обоснование</h3>
+              <h3 id="aiReviewReasoningTitle">Обоснование</h3>
               <p class="ai-review-rationale" id="aiReviewRationale"></p>
             </section>
             <section class="ai-review-section" aria-labelledby="aiReviewResultTitle">
-              <h3 id="aiReviewResultTitle">3. Результат</h3>
-              <div class="ai-review-result" id="aiReviewResult">
-                <span class="confidence-indicator" id="aiReviewConfidenceMark" aria-hidden="true"></span>
+              <h3 id="aiReviewResultTitle">Итог</h3>
+              <div class="ai-review-result">
                 <strong id="aiReviewConfidence"></strong>
               </div>
               <p class="ai-review-decision" id="aiReviewDecision"></p>
