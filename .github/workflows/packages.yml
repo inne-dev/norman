@@ -18,7 +18,7 @@ jobs:
           - os: macos-latest
             bundle: dmg
             artifact: norman-macos-dmg
-            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            rust-targets: aarch64-apple-darwin x86_64-apple-darwin
             build-args: --target universal-apple-darwin --bundles dmg
             path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
           - os: windows-latest
