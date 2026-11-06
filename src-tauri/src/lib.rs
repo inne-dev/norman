@@ -31,7 +31,7 @@ const MAX_FINDINGS_PER_RULE: usize = 40;
 const MAX_PARALLEL_PROCESSES: usize = 4;
 const RULES_JSON: &str = include_str!("../../data/rules.json");
 
-pub(super) fn normalize_parallel_processes(value: Option<serde_json::Value>) -> usize {
+pub(crate) fn normalize_parallel_processes(value: Option<serde_json::Value>) -> usize {
     value
         .and_then(|value| value.as_u64())
         .filter(|count| (1..=MAX_PARALLEL_PROCESSES as u64).contains(count))
@@ -136,7 +136,6 @@ pub struct AnalysisProgress {
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisResult {
     pub findings: Vec<Finding>,
-    pub checklist: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -268,15 +267,7 @@ pub fn analyze_document_with_progress_and_parallelism(
     let rules = compiled_rules().map_err(|error| error.to_string())?;
     let findings = analyze_with_parallelism(text, rules, parallel_processes, on_progress)
         .map_err(|error| error.to_string())?;
-    Ok(AnalysisResult {
-        findings,
-        checklist: vec![
-            "Проверьте орган издания и его полномочия по первичному источнику.".into(),
-            "Проверьте дату вступления в силу и сведения об официальном опубликовании.".into(),
-            "Сопоставьте положения со связанными актами и проверьте компетенцию.".into(),
-            "Проверьте полноту процедуры с учетом связанных актов и материалов.".into(),
-        ],
-    })
+    Ok(AnalysisResult { findings })
 }
 
 fn load_file_inner(path: &Path) -> AppResult<LoadedDocument> {
@@ -1209,7 +1200,7 @@ fn analyze_rule(
     match_limit: usize,
 ) -> Vec<Finding> {
     let mut seen = HashSet::new();
-    let mut new_findings = Vec::new();
+    let mut new_findings: Vec<Finding> = Vec::new();
     for pattern in &rule.patterns {
         for matched in pattern.find_iter(text) {
             if seen.insert((matched.start(), matched.end())) {
