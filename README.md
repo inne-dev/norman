@@ -27,7 +27,7 @@ npm run tauri dev
 
 ## Сборки
 
-Цели упаковки заданы в `src-tauri/tauri.conf.json`: NSIS для Windows (`*-setup.exe`), AppImage для Linux и DMG для macOS. Установите [системные зависимости Tauri](https://v2.tauri.app/start/prerequisites/) для своей ОС, затем выполните на целевой ОС:
+Цели упаковки: NSIS для Windows x64 (`*-setup.exe`), AppImage для Linux x64 и универсальный DMG для macOS Intel/Apple Silicon. Установите [системные зависимости Tauri](https://v2.tauri.app/start/prerequisites/) для своей ОС, затем выполните на целевой ОС:
 
 ```sh
 npm ci
@@ -36,7 +36,15 @@ npm run tauri build -- --bundles nsis     # Windows
 npm run tauri build -- --bundles appimage # Linux
 ```
 
-GitHub Actions запускает упаковку вручную или при push тега версии `v*`. macOS DMG и Windows NSIS установщик собираются на своих ОС и загружаются как артефакты запуска workflow. GitHub Release не создаётся. Linux AppImage можно собрать локально приведённой командой.
+Для выпуска укажите одинаковую версию в `package.json` и `src-tauri/tauri.conf.json`, проверьте её и отправьте тег:
+
+```sh
+npm run release:check -- v1.2.3
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+GitHub Actions соберёт macOS DMG, Windows NSIS и Linux AppImage и приложит файлы к GitHub Release. Повторный запуск обновит файлы релиза. `workflow_dispatch` соберёт те же файлы как артефакты workflow, но не опубликует релиз. Локальную сборку запускайте на целевой ОС приведёнными выше командами; для неё нужны системные зависимости Tauri.
 
 ## Просмотр сайта и uBlock Origin
 
