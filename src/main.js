@@ -91,6 +91,7 @@ const ui = {
   tabBar: document.querySelector('#tabBar'),
   tabList: document.querySelector('#tabList'),
   startScreen: document.querySelector('#startScreen'),
+  openWelcome: document.querySelector('#openWelcome'),
   analysisScreen: document.querySelector('#analysisScreen'),
   openUrlDialog: document.querySelector('#openUrlDialog'),
   urlDialog: document.querySelector('#urlDialog'),
@@ -144,6 +145,9 @@ const ui = {
   aiReviewDialog: document.querySelector('#aiReviewDialog'),
   aiReviewTitle: document.querySelector('#aiReviewTitle'),
   closeAiReview: document.querySelector('#closeAiReview'),
+  aiReviewSingleContent: document.querySelector('#aiReviewSingleContent'),
+  aiReviewReasoningDetails: document.querySelector('#aiReviewReasoningDetails'),
+  aiReviewResultsList: document.querySelector('#aiReviewResultsList'),
   aiReviewExcerpt: document.querySelector('#aiReviewExcerpt'),
   aiReviewRuleSection: document.querySelector('#aiReviewRuleSection'),
   aiReviewRuleExplanation: document.querySelector('#aiReviewRuleExplanation'),
@@ -208,6 +212,8 @@ const ui = {
   analysisSlowWarning: document.querySelector('#analysisSlowWarning'),
   findingsMessage: document.querySelector('#findingsMessage'),
   aiAnalysisNote: document.querySelector('#aiAnalysisNote'),
+  aiAnalysisMessage: document.querySelector('#aiAnalysisMessage'),
+  showPartialAiReview: document.querySelector('#showPartialAiReview'),
   retryAiAnalysis: document.querySelector('#retryAiAnalysis'),
   retryAnalysis: document.querySelector('#retryAnalysis'),
   findingList: document.querySelector('#findingList'),
@@ -350,13 +356,15 @@ function setTheme(theme) {
 
 setTheme(getSavedTheme());
 syncCodexSettingsUI();
-void showWelcomeOnce();
+void showWelcome();
 
-async function showWelcomeOnce() {
-  try {
-    if (localStorage.getItem(WELCOME_STORAGE_KEY) === 'shown') return;
-  } catch {
-    // Storage restrictions should not prevent the welcome from appearing.
+async function showWelcome(force = false) {
+  if (!force) {
+    try {
+      if (localStorage.getItem(WELCOME_STORAGE_KEY) === 'shown') return;
+    } catch {
+      // Storage restrictions should not prevent the welcome from appearing.
+    }
   }
 
   let totalMemoryBytes = null;
@@ -388,10 +396,12 @@ async function showWelcomeOnce() {
     customSelects.refresh();
   }
 
-  try {
-    localStorage.setItem(WELCOME_STORAGE_KEY, 'shown');
-  } catch {
-    // Keep the welcome usable for this session if storage is unavailable.
+  if (!force) {
+    try {
+      localStorage.setItem(WELCOME_STORAGE_KEY, 'shown');
+    } catch {
+      // Keep the welcome usable for this session if storage is unavailable.
+    }
   }
   ui.welcomeDialog.showModal();
 }
@@ -2053,9 +2063,12 @@ async function refreshYandexStatus() {
 function renderAiAnalysisNote() {
   let message = '';
   if (state.aiAnalysis === 'error' || state.aiAnalysis === 'unavailable') message = state.aiAnalysisMessage;
-  ui.aiAnalysisNote.textContent = message;
+  ui.aiAnalysisMessage.textContent = message;
   ui.aiAnalysisNote.dataset.state = state.aiAnalysis;
   ui.aiAnalysisNote.hidden = !message;
+  ui.showPartialAiReview.hidden = state.aiAnalysis !== 'error'
+    || state.aiProgress?.phase !== 'discover'
+    || !state.findings.some(isAiFinding);
   const retryable = state.aiAnalysis === 'error' || state.aiAnalysis === 'unavailable';
   const retrying = state.aiAnalysis === 'checking' || state.aiAnalysis === 'running';
   ui.retryAiAnalysis.hidden = state.analysis !== 'done' || (!retryable && !retrying);
@@ -2425,6 +2438,10 @@ function openAiReview(key) {
   const finding = state.findings[index];
   const providerLabel = aiProviderLabel(finding.aiProvider);
   const confidence = aiConfidenceLevel(finding.aiConfidence);
+  ui.aiReviewSingleContent.hidden = false;
+  ui.aiReviewResultsList.hidden = true;
+  ui.aiReviewResultsList.replaceChildren();
+  ui.aiReviewReasoningDetails.open = false;
   ui.aiReviewTitle.textContent = `Оценка · ${providerLabel}`;
   ui.aiReviewExcerpt.textContent = finding.excerpt || 'Фрагмент не сохранён.';
   const ruleExplanation = String(finding.reason || '').trim();
@@ -2437,6 +2454,55 @@ function openAiReview(key) {
   ui.aiReviewDecision.textContent = confidence === 'likely-false'
     ? `${providerLabel} не подтвердил сигнал; при необходимости его можно проверить вручную.`
     : 'Возможный сигнал; требуется экспертная проверка.';
+  ui.aiReviewDialog.showModal();
+}
+
+function openAiReviewResults() {
+  const findings = state.findings.filter(isAiFinding);
+  if (!findings.length) return;
+
+  ui.aiReviewResultsList.replaceChildren(...findings.map((finding) => {
+    const data = findingRowData(finding);
+    const confidence = aiConfidenceLevel(finding.aiConfidence);
+    const item = document.createElement('li');
+    item.className = 'ai-review-result-card';
+
+    const title = document.createElement('h3');
+    title.className = 'ai-review-result-title';
+    title.textContent = data.shortTitle;
+
+    const excerpt = document.createElement('blockquote');
+    excerpt.className = 'ai-review-excerpt';
+    excerpt.textContent = finding.excerpt || 'Фрагмент не сохранён.';
+
+    const result = document.createElement('div');
+    result.className = 'ai-review-result';
+    const resultLabel = document.createElement('strong');
+    resultLabel.textContent = aiReviewConfidenceLabel(finding.aiConfidence);
+    const decision = document.createElement('p');
+    decision.className = 'ai-review-decision';
+    decision.textContent = confidence === 'likely-false'
+      ? `${aiProviderLabel(finding.aiProvider)} не подтвердил сигнал; при необходимости его можно проверить вручную.`
+      : 'Возможный сигнал; требуется экспертная проверка.';
+    result.append(resultLabel, decision);
+
+    const reasoning = document.createElement('details');
+    reasoning.className = 'ai-review-reasoning';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Рассуждение ИИ';
+    const rationale = document.createElement('p');
+    rationale.className = 'ai-review-rationale';
+    rationale.textContent = (confidence === 'likely-false' && finding.aiRejectionReason)
+      || finding.aiRationale
+      || 'Рассуждение не сохранено.';
+    reasoning.append(summary, rationale);
+
+    item.append(title, excerpt, result, reasoning);
+    return item;
+  }));
+  ui.aiReviewSingleContent.hidden = true;
+  ui.aiReviewResultsList.hidden = false;
+  ui.aiReviewTitle.textContent = 'Результаты проверки ИИ';
   ui.aiReviewDialog.showModal();
 }
 
@@ -3355,6 +3421,7 @@ ui.ollamaSetupDialog.addEventListener('cancel', (event) => {
   if (ui.closeOllamaSetup.disabled || ollamaInstallInProgress) event.preventDefault();
 });
 ui.closeWelcome.addEventListener('click', closeWelcome);
+ui.openWelcome.addEventListener('click', () => void showWelcome(true));
 ui.continueWithoutAi.addEventListener('click', closeWelcome);
 ui.welcomeOpenSettings.addEventListener('click', openSettingsFromWelcome);
 ui.welcomeModel.addEventListener('change', renderWelcomeModelNote);
@@ -3367,6 +3434,7 @@ ui.welcomeDialog.addEventListener('click', (event) => {
 });
 ui.closeSettings.addEventListener('click', () => ui.settingsDialog.close());
 ui.closeAiReview.addEventListener('click', () => ui.aiReviewDialog.close());
+ui.showPartialAiReview.addEventListener('click', openAiReviewResults);
 ui.aiReviewDialog.addEventListener('click', (event) => {
   if (event.target === ui.aiReviewDialog) ui.aiReviewDialog.close();
 });

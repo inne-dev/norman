@@ -653,6 +653,25 @@ main {
   margin: auto;
 }
 
+.start-welcome-trigger {
+  position: absolute;
+  z-index: 1;
+  bottom: 18px;
+  left: clamp(24px, 5vw, 76px);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.start-welcome-trigger:hover {
+  color: var(--text-bright);
+}
+
+.start-welcome-trigger:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid var(--focus);
+  outline-offset: 4px;
+}
+
 .start-intro {
   margin-bottom: 20px;
   text-align: center;
@@ -1027,6 +1046,30 @@ main {
   overscroll-behavior: contain;
 }
 
+.ai-review-results-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ai-review-results-list > li {
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+  padding: 16px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+}
+
+.ai-review-results-list > li h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .ai-review-section {
   display: grid;
   min-width: 0;
@@ -1039,6 +1082,20 @@ main {
   font-size: 14px;
   font-weight: 600;
   line-height: 1.4;
+}
+
+.ai-review-reasoning > summary {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.ai-review-reasoning > summary:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
 }
 
 .ai-review-rationale,
@@ -2373,7 +2430,8 @@ p {
 
 .ai-analysis-note {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
+  align-items: flex-start;
   gap: 7px;
   margin: 5px 0 0;
   color: var(--muted);
@@ -2396,6 +2454,17 @@ p {
   border-radius: 50%;
   content: "";
   animation: spin 750ms linear infinite;
+}
+
+.ai-analysis-review-button {
+  flex: 0 1 auto;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+  font-weight: 600;
+  line-height: inherit;
+  text-align: left;
+  white-space: normal;
 }
 
 .ai-analysis-note[data-state="done"] {

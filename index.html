@@ -80,6 +80,7 @@
             <span>Открываем источник…</span>
           </div>
         </div>
+        <button class="text-button start-welcome-trigger" id="openWelcome" type="button">Привет</button>
       </main>
 
       <dialog class="modal welcome-modal" id="welcomeDialog" aria-labelledby="welcomeTitle" aria-describedby="welcomeDescription">
@@ -342,7 +343,14 @@
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
             </button>
           </div>
-          <div class="ai-review-content">
+          <div class="ai-review-content" id="aiReviewSingleContent">
+            <section class="ai-review-section" aria-labelledby="aiReviewResultTitle">
+              <h3 id="aiReviewResultTitle">Итог</h3>
+              <div class="ai-review-result">
+                <strong id="aiReviewConfidence"></strong>
+              </div>
+              <p class="ai-review-decision" id="aiReviewDecision"></p>
+            </section>
             <section class="ai-review-section" aria-labelledby="aiReviewInputTitle">
               <h3 id="aiReviewInputTitle">Фрагмент источника</h3>
               <blockquote class="ai-review-excerpt" id="aiReviewExcerpt"></blockquote>
@@ -351,18 +359,12 @@
               <h3 id="aiReviewRuleTitle">Объяснение правила</h3>
               <p class="ai-review-rule-explanation" id="aiReviewRuleExplanation"></p>
             </section>
-            <section class="ai-review-section" aria-labelledby="aiReviewReasoningTitle">
-              <h3 id="aiReviewReasoningTitle">Обоснование</h3>
+            <details class="ai-review-section ai-review-reasoning" id="aiReviewReasoningDetails" aria-labelledby="aiReviewReasoningTitle">
+              <summary id="aiReviewReasoningTitle">Рассуждение ИИ</summary>
               <p class="ai-review-rationale" id="aiReviewRationale"></p>
-            </section>
-            <section class="ai-review-section" aria-labelledby="aiReviewResultTitle">
-              <h3 id="aiReviewResultTitle">Итог</h3>
-              <div class="ai-review-result">
-                <strong id="aiReviewConfidence"></strong>
-              </div>
-              <p class="ai-review-decision" id="aiReviewDecision"></p>
-            </section>
+            </details>
           </div>
+          <ol class="ai-review-content ai-review-results-list" id="aiReviewResultsList" aria-label="Результаты ИИ по сигналам" hidden></ol>
         </div>
       </dialog>
 
@@ -412,7 +414,10 @@
                   <h2 id="findingsHeading">Сигналы</h2>
                   <span class="result-count" id="resultCount">—</span>
                 </div>
-                <p class="ai-analysis-note" id="aiAnalysisNote" role="status" aria-live="polite" hidden></p>
+                <div class="ai-analysis-note" id="aiAnalysisNote" role="status" aria-live="polite" hidden>
+                  <span id="aiAnalysisMessage"></span>
+                  <button class="text-button ai-analysis-review-button" id="showPartialAiReview" type="button" aria-haspopup="dialog" aria-controls="aiReviewDialog" hidden>Посмотреть результаты ИИ</button>
+                </div>
                 <button class="button button-secondary ai-retry-button" id="retryAiAnalysis" type="button" hidden>
                   Перезапустить анализ
                 </button>
