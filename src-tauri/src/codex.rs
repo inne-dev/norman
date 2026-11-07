@@ -20,7 +20,7 @@ use std::ffi::OsStr;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::Emitter;
-use url::Url;
+use url::{Host, Url};
 
 use super::{
     normalize_parallel_processes, Finding, RuleCatalog, RuleDefinition, MAX_PARALLEL_PROCESSES,
@@ -45,6 +45,14 @@ const OLLAMA_PER_RUN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const OLLAMA_TOTAL_RUN_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const DEFAULT_OLLAMA_URL: &str = "http://127.0.0.1:11434";
 const MAX_OLLAMA_URL_BYTES: usize = 2 * 1024;
+const OLLAMA_PULL_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+const MAX_OLLAMA_PULL_MODEL_BYTES: usize = 256;
+const MAX_OLLAMA_PULL_LINE_BYTES: usize = 16 * 1024;
+const MAX_OLLAMA_PULL_STREAM_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_OLLAMA_PULL_EVENTS: usize = 10_000;
+const MAX_OLLAMA_PULL_STATUS_CHARS: usize = 256;
+const MAX_OLLAMA_PULL_ERROR_CHARS: usize = 1024;
+const OLLAMA_PULL_PROGRESS_STEP_BYTES: u64 = 1024 * 1024;
 const CLOUDRU_API_BASE: &str = "https://foundation-models.api.cloud.ru";
 const MAX_CLOUDRU_API_KEY_BYTES: usize = 4 * 1024;
 const MAX_CLOUDRU_MODELS: usize = 500;
@@ -126,6 +134,33 @@ struct ProgressEvent {
 #[serde(rename_all = "camelCase")]
 struct FindingEvent {
     finding: Finding,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OllamaPullProgressEvent {
+    status: String,
+    completed: Option<u64>,
+    total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OllamaPullMessage {
+    status: Option<String>,
+    total: Option<u64>,
+    completed: Option<u64>,
+    error: Option<String>,
+}
+
+#[derive(Default)]
+struct OllamaPullProgressTracker {
+    last_status: Option<String>,
+    last_completed: Option<u64>,
+    last_total: Option<u64>,
+    last_emitted_completed: Option<u64>,
+    emitted_events: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,6 +310,26 @@ pub(super) async fn analyze_with_ollama(
     })
     .await
     .map_err(|_| "Обработка Ollama была прервана.".to_string())?
+}
+
+#[tauri::command]
+pub(super) async fn pull_ollama_model(
+    app: tauri::AppHandle,
+    model: String,
+) -> Result<(), String> {
+    let failure_app = app.clone();
+    match tokio::task::spawn_blocking(move || pull_ollama_model_inner(&app, &model)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            emit_ollama_pull_progress(&failure_app, "error", None, None, Some(error.clone()));
+            Err(error)
+        }
+        Err(_) => {
+            let error = "Загрузка модели Ollama была прервана.".to_string();
+            emit_ollama_pull_progress(&failure_app, "error", None, None, Some(error.clone()));
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -1485,6 +1540,234 @@ fn normalize_ollama_base_url(value: Option<&str>) -> Result<Url, String> {
     }
     url.set_path("/");
     Ok(url)
+}
+
+fn normalize_ollama_pull_model(model: &str) -> Result<String, String> {
+    if model.len() > MAX_OLLAMA_PULL_MODEL_BYTES {
+        return Err("Имя модели Ollama слишком длинное.".into());
+    }
+    if model.chars().any(char::is_control) {
+        return Err("Имя модели Ollama содержит недопустимые символы.".into());
+    }
+    let model = model.trim();
+    if model.is_empty() {
+        return Err("Укажите имя модели Ollama.".into());
+    }
+    Ok(model.to_string())
+}
+
+fn ollama_pull_url_is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
+fn build_ollama_pull_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(STATUS_TIMEOUT)
+        .timeout(OLLAMA_PULL_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .map_err(|_| "Не удалось подготовить подключение к Ollama.".into())
+}
+
+fn pull_ollama_model_inner(app: &tauri::AppHandle, requested_model: &str) -> Result<(), String> {
+    let model = normalize_ollama_pull_model(requested_model)?;
+    let base_url = normalize_ollama_base_url(None)?;
+    if !ollama_pull_url_is_loopback(&base_url) {
+        return Err("Автоматическая загрузка разрешена только с локального адреса Ollama.".into());
+    }
+    let client = build_ollama_pull_client()?;
+
+    emit_ollama_pull_progress(app, "starting", None, None, None);
+    let response = client
+        .post(ollama_endpoint(&base_url, "/api/pull"))
+        .json(&json!({ "model": model, "stream": true }))
+        .send()
+        .map_err(|_| "Не удалось подключиться к Ollama для загрузки модели.".to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(ollama_pull_http_error(response, status.as_u16()));
+    }
+
+    read_ollama_pull_stream(response, app)
+}
+
+fn ollama_pull_http_error(response: reqwest::blocking::Response, status: u16) -> String {
+    const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
+    let mut body = Vec::new();
+    if response
+        .take(MAX_ERROR_BODY_BYTES as u64 + 1)
+        .read_to_end(&mut body)
+        .is_ok()
+        && body.len() <= MAX_ERROR_BODY_BYTES
+    {
+        if let Ok(message) = serde_json::from_slice::<OllamaPullMessage>(&body) {
+            if let Some(error) = message.error {
+                return sanitize_ollama_pull_error(&error);
+            }
+        }
+    }
+    format!("Ollama API вернул HTTP {status} при загрузке модели.")
+}
+
+fn read_ollama_pull_stream(
+    mut response: reqwest::blocking::Response,
+    app: &tauri::AppHandle,
+) -> Result<(), String> {
+    let mut tracker = OllamaPullProgressTracker::default();
+    let mut read_buffer = [0_u8; 8 * 1024];
+    let mut line = Vec::with_capacity(1024);
+    let mut stream_bytes = 0_u64;
+
+    loop {
+        let read = response
+            .read(&mut read_buffer)
+            .map_err(|_| "Не удалось прочитать поток загрузки Ollama.".to_string())?;
+        if read == 0 {
+            break;
+        }
+        stream_bytes = stream_bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| "Поток загрузки Ollama превысил допустимый размер.".to_string())?;
+        if stream_bytes > MAX_OLLAMA_PULL_STREAM_BYTES {
+            return Err("Поток загрузки Ollama превысил допустимый размер.".into());
+        }
+
+        for byte in &read_buffer[..read] {
+            if *byte == b'\n' {
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                if process_ollama_pull_line(&line, app, &mut tracker)? {
+                    return Ok(());
+                }
+                line.clear();
+            } else {
+                if line.len() >= MAX_OLLAMA_PULL_LINE_BYTES {
+                    return Err("Строка потока загрузки Ollama слишком длинная.".into());
+                }
+                line.push(*byte);
+            }
+        }
+    }
+
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    if process_ollama_pull_line(&line, app, &mut tracker)? {
+        return Ok(());
+    }
+    Err("Поток Ollama завершился до окончания загрузки модели.".into())
+}
+
+fn process_ollama_pull_line(
+    line: &[u8],
+    app: &tauri::AppHandle,
+    tracker: &mut OllamaPullProgressTracker,
+) -> Result<bool, String> {
+    if line.is_empty() {
+        return Ok(false);
+    }
+    let message: OllamaPullMessage = serde_json::from_slice(line)
+        .map_err(|_| "Ollama вернула некорректный прогресс загрузки.".to_string())?;
+    if let Some(error) = message.error.as_deref() {
+        return Err(sanitize_ollama_pull_error(error));
+    }
+    let status = message
+        .status
+        .as_deref()
+        .filter(|status| {
+            !status.trim().is_empty()
+                && status.chars().count() <= MAX_OLLAMA_PULL_STATUS_CHARS
+                && !status.chars().any(char::is_control)
+        })
+        .ok_or_else(|| "Ollama вернула некорректный статус загрузки.".to_string())?;
+    if status == "error" {
+        return Err("Ollama сообщила об ошибке загрузки модели.".into());
+    }
+    if matches!((message.completed, message.total), (Some(done), Some(total)) if done > total) {
+        return Err("Ollama вернула некорректные данные прогресса загрузки.".into());
+    }
+
+    let total_changed = message.total.is_some() && message.total != tracker.last_total;
+    if let Some(completed) = message.completed {
+        tracker.last_completed = Some(completed);
+    }
+    if let Some(total) = message.total {
+        tracker.last_total = Some(total);
+    }
+
+    let is_success = status == "success";
+    let completed = if is_success {
+        message.completed.or(tracker.last_completed)
+    } else {
+        message.completed
+    };
+    let total = if is_success {
+        message.total.or(tracker.last_total)
+    } else {
+        message.total
+    };
+    let status_changed = tracker.last_status.as_deref() != Some(status);
+    let progress_changed = completed.is_some_and(|completed| {
+        let step = total
+            .map(|total| (total / 100).max(OLLAMA_PULL_PROGRESS_STEP_BYTES / 16))
+            .unwrap_or(OLLAMA_PULL_PROGRESS_STEP_BYTES);
+        tracker.last_emitted_completed.map_or(true, |previous| {
+            completed < previous || completed.saturating_sub(previous) >= step
+        })
+    });
+
+    if is_success {
+        emit_ollama_pull_progress(app, status, completed, total, None);
+        return Ok(true);
+    }
+    if (status_changed || total_changed || progress_changed)
+        && tracker.emitted_events < MAX_OLLAMA_PULL_EVENTS
+    {
+        emit_ollama_pull_progress(app, status, completed, total, None);
+        tracker.emitted_events += 1;
+        tracker.last_emitted_completed = completed;
+    }
+    tracker.last_status = Some(status.to_string());
+    Ok(false)
+}
+
+fn emit_ollama_pull_progress(
+    app: &tauri::AppHandle,
+    status: &str,
+    completed: Option<u64>,
+    total: Option<u64>,
+    error: Option<String>,
+) {
+    let error = error.map(|error| sanitize_ollama_pull_error(&error));
+    let _ = app.emit(
+        "ollama-pull-progress",
+        OllamaPullProgressEvent {
+            status: status.to_string(),
+            completed,
+            total,
+            error,
+        },
+    );
+}
+
+fn sanitize_ollama_pull_error(error: &str) -> String {
+    let message = error
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_OLLAMA_PULL_ERROR_CHARS)
+        .collect::<String>();
+    if message.trim().is_empty() {
+        "Ollama не смогла загрузить модель.".into()
+    } else {
+        message
+    }
 }
 
 fn build_ollama_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {

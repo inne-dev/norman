@@ -19,6 +19,7 @@ use thiserror::Error;
 use url::Url;
 
 mod codex;
+mod ollama_setup;
 
 const MAX_FILE_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 15 * 1024 * 1024;
@@ -294,6 +295,8 @@ pub fn run() {
             codex::analyze_with_codex,
             codex::get_ollama_status,
             codex::analyze_with_ollama,
+            codex::pull_ollama_model,
+            ollama_setup::install_ollama,
             codex::get_cloudru_status,
             codex::analyze_with_cloudru,
             codex::get_yandex_status,

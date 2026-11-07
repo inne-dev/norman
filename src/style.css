@@ -769,6 +769,45 @@ main {
   font-size: 12px;
 }
 
+.welcome-model-field {
+  display: grid;
+  gap: 6px;
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.welcome-model-field .modal-input {
+  height: 40px;
+  font-size: 12px;
+}
+
+.welcome-ollama .welcome-model-note,
+.welcome-ollama .welcome-installer-note,
+.welcome-ollama .welcome-install-status {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.welcome-progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--accent);
+}
+
+.welcome-progress[hidden],
+.welcome-install-status[hidden] {
+  display: none;
+}
+
+.welcome-install-status[data-state="error"] {
+  color: var(--text-error);
+}
+
+.welcome-install-status[data-state="ready"] {
+  color: var(--text-inline-success);
+}
+
 .welcome-actions {
   width: 100%;
   display: flex;

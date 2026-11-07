@@ -81,13 +81,22 @@
           <p id="welcomeDescription">Для наиболее полного разбора найденных сигналов можно включить дополнительную проверку с помощью ИИ. Провайдера и модель можно выбрать в настройках.</p>
           <p class="welcome-privacy">ИИ-проверка выключена по умолчанию. Документ будет отправляться только выбранному вами провайдеру после включения этой функции.</p>
           <section class="welcome-ollama" id="welcomeOllama" aria-labelledby="welcomeOllamaTitle" hidden>
-            <h3 id="welcomeOllamaTitle">Локальная модель может подойти вашему компьютеру</h3>
+            <h3 id="welcomeOllamaTitle">Запустить ИИ локально с Ollama</h3>
             <p id="welcomeMemory" hidden></p>
-            <p>Ollama — приложение для запуска ИИ-моделей на компьютере. При подключении к локальной Ollama вычисления и текст документа остаются на устройстве. Требования к памяти зависят от модели и графического процессора.</p>
+            <p>Ollama устанавливает и запускает модели на компьютере. При выборе локального сервера текст документа и вычисления остаются на устройстве. Подходящая скорость зависит также от GPU.</p>
+            <label class="welcome-model-field" for="welcomeModel">
+              <span>Рекомендуемая модель для вашего объёма ОЗУ</span>
+              <select class="modal-input codex-select" id="welcomeModel"></select>
+            </label>
+            <p class="welcome-model-note" id="welcomeModelNote"></p>
+            <p class="welcome-installer-note" id="welcomeInstallerNote"></p>
+            <progress class="welcome-progress" id="welcomeProgress" max="100" value="0" hidden aria-label="Установка Ollama и загрузка модели"></progress>
+            <p class="welcome-install-status" id="welcomeInstallStatus" role="status" aria-live="polite" hidden></p>
           </section>
           <div class="welcome-actions">
             <button class="button button-secondary" id="continueWithoutAi" type="button">Продолжить без ИИ</button>
-            <button class="button button-primary" id="welcomeOpenSettings" type="button">Настроить ИИ</button>
+            <button class="button button-secondary" id="welcomeOpenSettings" type="button">Настроить ИИ</button>
+            <button class="button button-primary" id="welcomeInstallOllama" type="button" hidden>Установить Ollama и скачать модель</button>
           </div>
         </div>
       </dialog>
