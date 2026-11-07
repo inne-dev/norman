@@ -446,13 +446,13 @@ function installStatus(message, stateName = 'loading') {
 
 function ollamaInstallFailureMessage(error) {
   const detail = messageFrom(error);
-  return `Не удалось завершить установку Ollama. ${detail} Нажмите «Повторить установку»: приложение заново проверит Ollama и продолжит настройку. Если ошибка повторится, проверьте подключение к интернету и свободное место.`;
+  return `Не удалось настроить Ollama и загрузить модель. ${detail} Нажмите «Повторить установку»: приложение проверит состояние Ollama и повторит загрузку модели. Если ошибка повторится, проверьте подключение к интернету и свободное место.`;
 }
 
 function setWelcomeInstallBusy(busy) {
   welcomeInstallInProgress = busy;
   ui.welcomeInstallOllama.disabled = busy;
-  if (busy) ui.welcomeInstallOllama.textContent = 'Устанавливаем Ollama…';
+  if (busy) ui.welcomeInstallOllama.textContent = 'Настраиваем Ollama…';
   else if (!welcomeInstallComplete && ui.welcomeInstallStatus.dataset.state === 'error') {
     ui.welcomeInstallOllama.textContent = 'Повторить установку';
   }
@@ -470,12 +470,14 @@ function humanizeOllamaPullStatus(status) {
     'pulling manifest': 'Подготавливаем модель…',
     'verifying sha256 digest': 'Проверяем целостность модели…',
     'writing manifest': 'Сохраняем модель…',
+    reconnecting: 'Соединение прервалось, переподключаемся…',
     success: 'Модель загружена.',
   };
   return labels[status] || (status ? `Загрузка модели: ${status}` : 'Загружаем модель…');
 }
 
 function renderOllamaDownloadStatus(model, payload = {}) {
+  const reconnecting = payload.status === 'reconnecting';
   const total = Number(payload.total);
   const completed = Number(payload.completed);
   const percent = payload.status === 'success'
@@ -484,9 +486,11 @@ function renderOllamaDownloadStatus(model, payload = {}) {
       ? Math.floor(Math.min(100, Math.max(0, completed / total * 100)))
       : 0;
 
-  ui.ollamaDownloadLabel.textContent = `Скачиваем ${model.name}`;
-  ui.ollamaDownloadProgress.value = percent;
-  ui.ollamaDownloadPercent.textContent = `${percent}%`;
+  ui.ollamaDownloadLabel.textContent = reconnecting ? 'Переподключаемся к Ollama…' : `Скачиваем ${model.name}`;
+  if (!reconnecting) {
+    ui.ollamaDownloadProgress.value = percent;
+    ui.ollamaDownloadPercent.textContent = `${percent}%`;
+  }
   ui.ollamaDownloadStatus.hidden = false;
 }
 
