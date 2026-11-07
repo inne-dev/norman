@@ -1069,7 +1069,7 @@ fn discovery_partitions(
                 .cloned()
                 .collect();
             ai_factors.sort();
-            let mut rule_ids = rules
+            let rule_ids = rules
                 .values()
                 .filter(|rule| rule_factors.contains(&rule.factor))
                 .map(|rule| rule.id.clone())
