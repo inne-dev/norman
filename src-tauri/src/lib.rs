@@ -1,10 +1,10 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env, fs::{self, File},
     io::{Cursor, Read},
     path::Path,
     process::{Command, Stdio},
-    sync::OnceLock,
+    sync::{Arc, Condvar, Mutex, OnceLock},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -14,7 +14,7 @@ use encoding_rs::{Encoding, UTF_8};
 use regex::{Regex, RegexBuilder};
 use scraper::{Html, Node, Selector};
 use serde::{Deserialize, Serialize};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use thiserror::Error;
 use url::Url;
 
@@ -30,6 +30,7 @@ const MAX_URL_REDIRECTS: usize = 5;
 const MAX_FINDINGS: usize = 500;
 const MAX_FINDINGS_PER_RULE: usize = 40;
 const MAX_PARALLEL_PROCESSES: usize = 4;
+const MAX_ANALYSIS_ID_BYTES: usize = 256;
 const RULES_JSON: &str = include_str!("../../data/rules.json");
 
 pub(crate) fn normalize_parallel_processes(value: Option<serde_json::Value>) -> usize {
@@ -38,6 +39,85 @@ pub(crate) fn normalize_parallel_processes(value: Option<serde_json::Value>) -> 
         .filter(|count| (1..=MAX_PARALLEL_PROCESSES as u64).contains(count))
         .map(|count| count as usize)
         .unwrap_or(1)
+}
+
+#[derive(Default)]
+pub(crate) struct AnalysisPauseRegistry {
+    controls: Mutex<HashMap<String, Arc<AnalysisPauseControl>>>,
+}
+
+#[derive(Default)]
+struct PauseState {
+    requested: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct AnalysisPauseControl {
+    state: Mutex<PauseState>,
+    changed: Condvar,
+}
+
+impl AnalysisPauseRegistry {
+    pub(crate) fn control(&self, analysis_id: &str) -> Arc<AnalysisPauseControl> {
+        let mut controls = self.controls.lock().unwrap_or_else(|error| error.into_inner());
+        controls
+            .entry(analysis_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    fn release(&self, analysis_id: &str) {
+        if let Some(control) = self
+            .controls
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(analysis_id)
+        {
+            control.set_paused(false);
+        }
+    }
+}
+
+pub(crate) fn analysis_pause_control(
+    app: &tauri::AppHandle,
+    analysis_id: &str,
+) -> Result<Arc<AnalysisPauseControl>, String> {
+    if analysis_id.trim().is_empty() || analysis_id.len() > MAX_ANALYSIS_ID_BYTES {
+        return Err("Не удалось определить запуск анализа.".into());
+    }
+    Ok(app.state::<AnalysisPauseRegistry>().control(analysis_id))
+}
+
+impl AnalysisPauseControl {
+    fn set_paused(&self, paused: bool) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.requested = paused;
+        if !paused {
+            self.changed.notify_all();
+        }
+    }
+
+    pub(crate) fn checkpoint(&self, app: &tauri::AppHandle, analysis_id: &str) {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if !state.requested {
+            return;
+        }
+        drop(state);
+        let _ = app.emit(
+            "analysis-pause-state",
+            serde_json::json!({ "analysisId": analysis_id, "paused": true }),
+        );
+
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        while state.requested {
+            state = self.changed.wait(state).unwrap_or_else(|error| error.into_inner());
+        }
+        drop(state);
+        let _ = app.emit(
+            "analysis-pause-state",
+            serde_json::json!({ "analysisId": analysis_id, "paused": false }),
+        );
+    }
 }
 
 #[derive(Debug, Error)]
@@ -250,17 +330,50 @@ fn system_memory_bytes() -> Result<u64, String> {
 #[tauri::command]
 async fn analyze_text(
     app: tauri::AppHandle,
+    analysis_id: String,
     text: String,
     parallel_processes: Option<serde_json::Value>,
 ) -> Result<AnalysisResult, String> {
+    if analysis_id.trim().is_empty() || analysis_id.len() > MAX_ANALYSIS_ID_BYTES {
+        return Err("Не удалось определить запуск анализа.".into());
+    }
     let parallel_processes = normalize_parallel_processes(parallel_processes);
+    let control = app.state::<AnalysisPauseRegistry>().control(&analysis_id);
+    let worker_analysis_id = analysis_id.clone();
     tokio::task::spawn_blocking(move || {
-        analyze_document_with_progress_and_parallelism(&text, parallel_processes, |progress| {
-            let _ = app.emit("analysis-progress", progress);
-        })
+        analyze_document_with_pause(
+            &text,
+            parallel_processes,
+            &control,
+            &app,
+            &worker_analysis_id,
+            |progress| {
+                let _ = app.emit("analysis-progress", progress);
+            },
+        )
     })
     .await
     .map_err(|_| AppError::WorkerFailed.to_string())?
+}
+
+#[tauri::command]
+fn set_analysis_paused(
+    app: tauri::AppHandle,
+    analysis_id: String,
+    paused: bool,
+) -> Result<(), String> {
+    if analysis_id.trim().is_empty() || analysis_id.len() > MAX_ANALYSIS_ID_BYTES {
+        return Err("Не удалось определить запуск анализа.".into());
+    }
+    app.state::<AnalysisPauseRegistry>()
+        .control(&analysis_id)
+        .set_paused(paused);
+    Ok(())
+}
+
+#[tauri::command]
+fn release_analysis_pause(app: tauri::AppHandle, analysis_id: String) {
+    app.state::<AnalysisPauseRegistry>().release(&analysis_id);
 }
 
 #[tauri::command]
@@ -283,12 +396,15 @@ fn get_rule_catalog() -> Result<Vec<RuleSummary>, String> {
 
 pub fn run() {
     tauri::Builder::default()
+        .manage(AnalysisPauseRegistry::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             load_file,
             load_url,
             analyze_text,
+            set_analysis_paused,
+            release_analysis_pause,
             get_rule_catalog,
             get_system_memory_bytes,
             codex::get_codex_status,
@@ -336,8 +452,30 @@ pub fn analyze_document_with_progress_and_parallelism(
     parallel_processes: usize,
     on_progress: impl FnMut(AnalysisProgress),
 ) -> Result<AnalysisResult, String> {
+    analyze_document_with_checkpoint(text, parallel_processes, on_progress, || {})
+}
+
+fn analyze_document_with_pause(
+    text: &str,
+    parallel_processes: usize,
+    control: &AnalysisPauseControl,
+    app: &tauri::AppHandle,
+    analysis_id: &str,
+    on_progress: impl FnMut(AnalysisProgress),
+) -> Result<AnalysisResult, String> {
+    analyze_document_with_checkpoint(text, parallel_processes, on_progress, || {
+        control.checkpoint(app, analysis_id);
+    })
+}
+
+fn analyze_document_with_checkpoint(
+    text: &str,
+    parallel_processes: usize,
+    on_progress: impl FnMut(AnalysisProgress),
+    checkpoint: impl FnMut(),
+) -> Result<AnalysisResult, String> {
     let rules = compiled_rules().map_err(|error| error.to_string())?;
-    let findings = analyze_with_parallelism(text, rules, parallel_processes, on_progress)
+    let findings = analyze_with_parallelism(text, rules, parallel_processes, on_progress, checkpoint)
         .map_err(|error| error.to_string())?;
     Ok(AnalysisResult { findings })
 }
@@ -1185,7 +1323,7 @@ fn analyze(
     rules: &[CompiledRule],
     on_progress: impl FnMut(AnalysisProgress),
 ) -> AppResult<Vec<Finding>> {
-    analyze_with_parallelism(text, rules, 1, on_progress)
+    analyze_with_parallelism(text, rules, 1, on_progress, || {})
 }
 
 fn analyze_with_parallelism(
@@ -1193,6 +1331,7 @@ fn analyze_with_parallelism(
     rules: &[CompiledRule],
     parallel_processes: usize,
     mut on_progress: impl FnMut(AnalysisProgress),
+    mut checkpoint: impl FnMut(),
 ) -> AppResult<Vec<Finding>> {
     check_text(text)?;
     let offsets = OffsetMap::new(text);
@@ -1203,6 +1342,7 @@ fn analyze_with_parallelism(
     let mut next_rule = 0;
 
     while next_rule < rules.len() {
+        checkpoint();
         let remaining = MAX_FINDINGS.saturating_sub(findings.len());
         if remaining == 0 {
             for rule_index in next_rule..rules.len() {

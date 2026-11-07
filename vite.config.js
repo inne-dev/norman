@@ -25,11 +25,13 @@ const URL_PATH = '/__norman/load-url';
 const FILE_PATH = '/__norman/load-file';
 const CODEX_STATUS_PATH = '/__norman/codex/status';
 const CODEX_ANALYZE_PATH = '/__norman/codex/analyze';
+const CODEX_PAUSE_PATH = '/__norman/codex/pause';
 const CODEX_MODELS = new Set(['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra']);
 const CODEX_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const CODEX_CONFIDENCES = ['likely_false', 'low', 'medium', 'high'];
 const CODEX_DISCOVERY_CONFIDENCES = ['low', 'medium', 'high'];
 const CODEX_GENERIC_RULE_ID = 'AE-AI-01';
+const codexPauseControls = new Map();
 
 const CODEX_REVIEW_SCHEMA = {
   type: 'object',
@@ -410,6 +412,9 @@ function validateCodexOptions(payload) {
   if (typeof payload.text !== 'string' || !payload.text.trim()) {
     throw new AdapterError(400, 'Запрос Codex не содержит текст документа.');
   }
+  if (typeof payload.analysisId !== 'string' || !/^[\w:-]{1,128}$/u.test(payload.analysisId)) {
+    throw new AdapterError(400, 'Запрос Codex не содержит идентификатор анализа.');
+  }
   if (Buffer.byteLength(payload.text, 'utf8') > MAX_CODEX_TEXT_BYTES) {
     throw new AdapterError(413, 'Текст для Codex превышает лимит 512 КБ.');
   }
@@ -427,12 +432,84 @@ function validateCodexOptions(payload) {
     throw new AdapterError(400, 'Число параллельных процессов Codex должно быть от 1 до 4.');
   }
   return {
+    analysisId: payload.analysisId,
     text: payload.text,
     findings: payload.findings,
     model: payload.model,
     reasoningEffort: payload.reasoningEffort,
     parallelProcesses,
   };
+}
+
+class CodexPauseControl {
+  constructor(analysisId) {
+    this.analysisId = analysisId;
+    this.requested = false;
+    this.waiters = 0;
+    this.releases = [];
+    this.response = null;
+  }
+
+  attach(response) {
+    this.response = response;
+  }
+
+  emit(paused) {
+    if (!this.response || this.response.writableEnded || this.response.destroyed) return;
+    this.response.write(`${JSON.stringify({ type: 'pause', payload: { analysisId: this.analysisId, paused } })}\n`);
+  }
+
+  setPaused(paused) {
+    this.requested = paused;
+    if (!paused) {
+      this.releases.splice(0).forEach((release) => release());
+      return;
+    }
+  }
+
+  async checkpoint(participants) {
+    while (this.requested) {
+      this.waiters += 1;
+      if (this.waiters >= participants) this.emit(true);
+      await new Promise((resolve) => {
+        this.releases.push(resolve);
+        if (!this.requested) resolve();
+      });
+      this.waiters -= 1;
+      if (!this.requested && this.waiters === 0) this.emit(false);
+    }
+  }
+}
+
+function codexPauseControlFor(analysisId) {
+  let control = codexPauseControls.get(analysisId);
+  if (!control) {
+    control = new CodexPauseControl(analysisId);
+    codexPauseControls.set(analysisId, control);
+  }
+  return control;
+}
+
+async function handleCodexPause(req, res) {
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST');
+    return json(res, 405, { error: 'Поддерживаются только POST-запросы.' });
+  }
+  const payload = await readCodexPayload(req);
+  if (typeof payload.analysisId !== 'string' || !/^[\w:-]{1,128}$/u.test(payload.analysisId)) {
+    throw new AdapterError(400, 'Не удалось определить запуск анализа.');
+  }
+  const control = codexPauseControls.get(payload.analysisId);
+  if (payload.release === true) {
+    control?.setPaused(false);
+    codexPauseControls.delete(payload.analysisId);
+    return json(res, 200, { released: true });
+  }
+  if (typeof payload.paused !== 'boolean') {
+    throw new AdapterError(400, 'Не указано состояние паузы.');
+  }
+  codexPauseControlFor(payload.analysisId).setPaused(payload.paused);
+  return json(res, 200, { paused: payload.paused });
 }
 
 async function readCodexReferences() {
@@ -681,17 +758,23 @@ function codexFindingEvent(res, finding) {
   res.write(`${JSON.stringify({ type: 'finding', payload: { finding } })}\n`);
 }
 
-async function runConcurrentTasks(tasks, concurrency, parentSignal) {
+async function runConcurrentTasks(tasks, concurrency, parentSignal, pauseControl = null) {
   if (tasks.length === 0) return [];
   const controller = new AbortController();
-  const abortFromParent = () => controller.abort();
+  const abortFromParent = () => {
+    controller.abort();
+    pauseControl?.setPaused(false);
+  };
   if (parentSignal.aborted) controller.abort();
   else parentSignal.addEventListener('abort', abortFromParent, { once: true });
 
   const results = new Array(tasks.length);
   let nextTask = 0;
+  const workerCount = Math.min(tasks.length, Math.max(1, Math.floor(concurrency) || 1));
   const worker = async () => {
     while (!controller.signal.aborted) {
+      await pauseControl?.checkpoint(workerCount);
+      if (controller.signal.aborted) return;
       const index = nextTask;
       nextTask += 1;
       if (index >= tasks.length) return;
@@ -699,11 +782,11 @@ async function runConcurrentTasks(tasks, concurrency, parentSignal) {
         results[index] = await tasks[index](controller.signal);
       } catch (error) {
         controller.abort();
+        pauseControl?.setPaused(false);
         throw error;
       }
     }
   };
-  const workerCount = Math.min(tasks.length, Math.max(1, Math.floor(concurrency) || 1));
   const outcomes = await Promise.allSettled(Array.from({ length: workerCount }, () => worker()));
   parentSignal.removeEventListener('abort', abortFromParent);
   if (parentSignal.aborted) return null;
@@ -1067,14 +1150,20 @@ async function handleCodexAnalyze(req, res) {
   res.setHeader('X-Accel-Buffering', 'no');
 
   const controller = new AbortController();
+  let pauseControl = null;
   const abortIfDisconnected = () => {
-    if (!res.writableEnded) controller.abort();
+    if (!res.writableEnded) {
+      controller.abort();
+      pauseControl?.setPaused(false);
+    }
   };
   res.once('close', abortIfDisconnected);
   req.once('aborted', abortIfDisconnected);
 
   try {
     const payload = validateCodexOptions(await readCodexPayload(req));
+    pauseControl = codexPauseControlFor(payload.analysisId);
+    pauseControl.attach(res);
     const references = await readCodexReferences();
     const findings = payload.findings.map((finding) => {
       return validateCodexFinding(finding, payload.text, references.ruleMap);
@@ -1127,6 +1216,7 @@ async function handleCodexAnalyze(req, res) {
       verificationTasks,
       payload.parallelProcesses,
       controller.signal,
+      pauseControl,
     );
     if (controller.signal.aborted) return;
     codexFindings.push(...reviewedFindings);
@@ -1194,6 +1284,7 @@ async function handleCodexAnalyze(req, res) {
       discoveryTasks,
       payload.parallelProcesses,
       controller.signal,
+      pauseControl,
     );
     if (controller.signal.aborted) return;
     const seenFindings = findings.slice();
@@ -1213,6 +1304,7 @@ async function handleCodexAnalyze(req, res) {
       codexFindingEvent(res, finding);
     }
 
+    await pauseControl.checkpoint(1);
     codexProgressEvent(res, 'discover', discoveryScopes.length, discoveryScopes.length);
     if (!res.writableEnded && !res.destroyed) {
       res.write(`${JSON.stringify({ type: 'complete', payload: { findings: codexFindings } })}\n`);
@@ -1229,6 +1321,10 @@ async function handleCodexAnalyze(req, res) {
       codexErrorEvent(res, message);
     }
   } finally {
+    pauseControl?.setPaused(false);
+    if (pauseControl && codexPauseControls.get(pauseControl.analysisId) === pauseControl) {
+      codexPauseControls.delete(pauseControl.analysisId);
+    }
     res.removeListener('close', abortIfDisconnected);
     req.removeListener('aborted', abortIfDisconnected);
     if (!res.writableEnded) res.end();
@@ -1268,7 +1364,8 @@ const devLoadAdapter = {
       }
       if (
         pathname !== URL_PATH && pathname !== FILE_PATH &&
-        pathname !== CODEX_STATUS_PATH && pathname !== CODEX_ANALYZE_PATH
+        pathname !== CODEX_STATUS_PATH && pathname !== CODEX_ANALYZE_PATH &&
+        pathname !== CODEX_PAUSE_PATH
       ) return next();
       if (!isLoopbackRequest(req, server.config.server.port)) {
         return json(res, 403, { error: 'Доступ разрешён только из локального окна Нормана.' });
@@ -1285,6 +1382,14 @@ const devLoadAdapter = {
             codexErrorEvent(res, 'Не удалось выполнить проверку Codex.');
             res.end();
           }
+        });
+        return;
+      }
+      if (pathname === CODEX_PAUSE_PATH) {
+        void handleCodexPause(req, res).catch((error) => {
+          const status = error instanceof AdapterError ? error.status : 500;
+          const message = error instanceof AdapterError ? error.message : 'Не удалось изменить состояние паузы.';
+          if (!res.writableEnded) json(res, status, { error: message });
         });
         return;
       }

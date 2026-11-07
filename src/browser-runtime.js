@@ -183,7 +183,7 @@ function createRuleWorker(text) {
   };
 }
 
-export async function analyzeTextInBrowser(text, onProgress, parallelProcesses = 1) {
+export async function analyzeTextInBrowser(text, onProgress, parallelProcesses = 1, pauseController = null) {
   if (!Number.isInteger(parallelProcesses) || parallelProcesses < 1 || parallelProcesses > 4) {
     throw new Error('Число параллельных процессов должно быть от 1 до 4.');
   }
@@ -213,6 +213,7 @@ export async function analyzeTextInBrowser(text, onProgress, parallelProcesses =
     const findings = [];
     let nextRule = 0;
     while (nextRule < totalRules) {
+      await pauseController?.checkpoint();
       const remaining = maxFindings - findings.length;
       if (remaining === 0) {
         for (let ruleIndex = nextRule; ruleIndex < totalRules; ruleIndex += 1) {
@@ -235,6 +236,7 @@ export async function analyzeTextInBrowser(text, onProgress, parallelProcesses =
         onProgress({ completedRules: nextRule + 1, totalRules, findings: added });
         nextRule += 1;
       }
+      await pauseController?.checkpoint();
     }
 
     return {

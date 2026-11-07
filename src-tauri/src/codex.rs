@@ -50,6 +50,8 @@ const MAX_OLLAMA_PULL_LINE_BYTES: usize = 16 * 1024;
 const MAX_OLLAMA_PULL_EVENTS: usize = 10_000;
 const MAX_OLLAMA_PULL_STATUS_CHARS: usize = 256;
 const MAX_OLLAMA_PULL_ERROR_CHARS: usize = 1024;
+const MAX_OLLAMA_PULL_ATTEMPTS: usize = 3;
+const OLLAMA_PULL_RETRY_DELAY: Duration = Duration::from_secs(2);
 const OLLAMA_PULL_PROGRESS_STEP_BYTES: u64 = 1024 * 1024;
 const CLOUDRU_API_BASE: &str = "https://foundation-models.api.cloud.ru";
 const MAX_CLOUDRU_API_KEY_BYTES: usize = 4 * 1024;
@@ -162,6 +164,11 @@ struct OllamaPullProgressTracker {
     emitted_events: usize,
 }
 
+enum OllamaPullStreamError {
+    Interrupted,
+    Failed(String),
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VerificationResponse {
@@ -251,6 +258,7 @@ pub(super) async fn get_codex_status() -> CodexStatus {
 #[tauri::command]
 pub(super) async fn analyze_with_codex(
     app: tauri::AppHandle,
+    analysis_id: String,
     text: String,
     findings: Vec<Finding>,
     model: Option<String>,
@@ -258,9 +266,13 @@ pub(super) async fn analyze_with_codex(
     parallel_processes: Option<Value>,
 ) -> Result<Vec<Finding>, String> {
     let parallel_processes = normalize_parallel_processes(parallel_processes);
+    let control = super::analysis_pause_control(&app, &analysis_id)?;
+    let worker_analysis_id = analysis_id.clone();
     tokio::task::spawn_blocking(move || {
         analyze_with_ai_inner(
             &app,
+            &control,
+            &worker_analysis_id,
             &text,
             findings,
             model,
@@ -288,6 +300,7 @@ pub(super) async fn get_ollama_status(base_url: Option<String>) -> OllamaStatus 
 #[tauri::command]
 pub(super) async fn analyze_with_ollama(
     app: tauri::AppHandle,
+    analysis_id: String,
     base_url: Option<String>,
     text: String,
     findings: Vec<Finding>,
@@ -295,11 +308,15 @@ pub(super) async fn analyze_with_ollama(
     parallel_processes: Option<Value>,
 ) -> Result<Vec<Finding>, String> {
     let parallel_processes = normalize_parallel_processes(parallel_processes);
+    let control = super::analysis_pause_control(&app, &analysis_id)?;
+    let worker_analysis_id = analysis_id.clone();
     tokio::task::spawn_blocking(move || {
         let base_url = normalize_ollama_base_url(base_url.as_deref())?;
         let client = build_ollama_client(OLLAMA_PER_RUN_TIMEOUT)?;
         analyze_with_ai_inner(
             &app,
+            &control,
+            &worker_analysis_id,
             &text,
             findings,
             model,
@@ -350,6 +367,7 @@ pub(super) async fn get_cloudru_status(api_key: String) -> CloudruStatus {
 #[tauri::command]
 pub(super) async fn analyze_with_cloudru(
     app: tauri::AppHandle,
+    analysis_id: String,
     api_key: String,
     text: String,
     findings: Vec<Finding>,
@@ -358,11 +376,15 @@ pub(super) async fn analyze_with_cloudru(
     parallel_processes: Option<Value>,
 ) -> Result<Vec<Finding>, String> {
     let parallel_processes = normalize_parallel_processes(parallel_processes);
+    let control = super::analysis_pause_control(&app, &analysis_id)?;
+    let worker_analysis_id = analysis_id.clone();
     tokio::task::spawn_blocking(move || {
         let api_key = normalize_cloudru_api_key(&api_key)?;
         let client = build_cloudru_client(PER_RUN_TIMEOUT)?;
         analyze_with_ai_inner(
             &app,
+            &control,
+            &worker_analysis_id,
             &text,
             findings,
             model,
@@ -389,6 +411,7 @@ pub(super) async fn get_yandex_status(api_key: String, folder_id: String) -> Yan
 #[tauri::command]
 pub(super) async fn analyze_with_yandex(
     app: tauri::AppHandle,
+    analysis_id: String,
     api_key: String,
     folder_id: String,
     text: String,
@@ -397,12 +420,16 @@ pub(super) async fn analyze_with_yandex(
     parallel_processes: Option<Value>,
 ) -> Result<Vec<Finding>, String> {
     let parallel_processes = normalize_parallel_processes(parallel_processes);
+    let control = super::analysis_pause_control(&app, &analysis_id)?;
+    let worker_analysis_id = analysis_id.clone();
     tokio::task::spawn_blocking(move || {
         let api_key = normalize_yandex_api_key(&api_key)?;
         let folder_id = normalize_yandex_folder_id(&folder_id)?;
         let client = build_yandex_client(PER_RUN_TIMEOUT)?;
         analyze_with_ai_inner(
             &app,
+            &control,
+            &worker_analysis_id,
             &text,
             findings,
             model,
@@ -487,6 +514,8 @@ fn detect_codex_status() -> CodexStatus {
 
 fn analyze_with_ai_inner(
     app: &tauri::AppHandle,
+    control: &super::AnalysisPauseControl,
+    analysis_id: &str,
     text: &str,
     mut findings: Vec<Finding>,
     model: Option<String>,
@@ -495,6 +524,7 @@ fn analyze_with_ai_inner(
     provider: AiProvider,
 ) -> Result<Vec<Finding>, String> {
     let parallel_processes = parallel_processes.clamp(1, MAX_PARALLEL_PROCESSES);
+    control.checkpoint(app, analysis_id);
     let (model, reasoning_effort) = match &provider {
         AiProvider::Codex => (
             validate_choice(model, "gpt-6-luna", &ALLOWED_MODELS, "модель")?,
@@ -648,6 +678,7 @@ fn analyze_with_ai_inner(
 
     let mut completed = 0;
     for batch_start in (0..total).step_by(parallel_processes) {
+        control.checkpoint(app, analysis_id);
         let batch_end = (batch_start + parallel_processes).min(total);
         let mut active_finding_ids = findings[batch_start..batch_end]
             .iter()
@@ -748,6 +779,7 @@ fn analyze_with_ai_inner(
     }
     let mut discovery_responses = Vec::with_capacity(discovery_jobs.len());
     for batch in discovery_jobs.chunks(parallel_processes) {
+        control.checkpoint(app, analysis_id);
         let batch_responses = thread::scope(|scope| {
             let handles = batch
                 .iter()
@@ -828,6 +860,7 @@ fn analyze_with_ai_inner(
         findings.push(finding.clone());
         emit_finding(app, finding);
     }
+    control.checkpoint(app, analysis_id);
     findings.sort_by(|left, right| {
         (left.start, left.end, &left.rule_id).cmp(&(right.start, right.end, &right.rule_id))
     });
@@ -1593,20 +1626,55 @@ fn pull_ollama_model_inner(app: &tauri::AppHandle, requested_model: &str) -> Res
     }
     let client = build_ollama_pull_client()?;
 
-    emit_ollama_pull_progress(app, "starting", None, None, None);
-    super::ollama_setup::check_setup_cancelled()?;
-    let response = client
-        .post(ollama_endpoint(&base_url, "/api/pull"))
-        .json(&json!({ "model": model, "stream": true }))
-        .send()
-        .map_err(|_| "Не удалось подключиться к Ollama для загрузки модели.".to_string())?;
-    super::ollama_setup::check_setup_cancelled()?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(ollama_pull_http_error(response, status.as_u16()));
+    for attempt in 0..MAX_OLLAMA_PULL_ATTEMPTS {
+        super::ollama_setup::check_setup_cancelled()?;
+        if attempt == 0 {
+            emit_ollama_pull_progress(app, "starting", None, None, None);
+        }
+        let response = match client
+            .post(ollama_endpoint(&base_url, "/api/pull"))
+            .json(&json!({ "model": model, "stream": true }))
+            .send()
+        {
+            Ok(response) => response,
+            Err(_) if attempt + 1 < MAX_OLLAMA_PULL_ATTEMPTS => {
+                wait_before_ollama_pull_retry(app)?;
+                continue;
+            }
+            Err(_) => return Err(ollama_pull_retry_exhausted_error()),
+        };
+        super::ollama_setup::check_setup_cancelled()?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ollama_pull_http_error(response, status.as_u16()));
+        }
+
+        match read_ollama_pull_stream(response, app) {
+            Ok(()) => return Ok(()),
+            Err(OllamaPullStreamError::Failed(error)) => return Err(error),
+            Err(OllamaPullStreamError::Interrupted)
+                if attempt + 1 < MAX_OLLAMA_PULL_ATTEMPTS =>
+            {
+                wait_before_ollama_pull_retry(app)?;
+            }
+            Err(OllamaPullStreamError::Interrupted) => {
+                return Err(ollama_pull_retry_exhausted_error());
+            }
+        }
     }
 
-    read_ollama_pull_stream(response, app)
+    Err(ollama_pull_retry_exhausted_error())
+}
+
+fn wait_before_ollama_pull_retry(app: &tauri::AppHandle) -> Result<(), String> {
+    emit_ollama_pull_progress(app, "reconnecting", None, None, None);
+    thread::sleep(OLLAMA_PULL_RETRY_DELAY);
+    super::ollama_setup::check_setup_cancelled()?;
+    Ok(())
+}
+
+fn ollama_pull_retry_exhausted_error() -> String {
+    "Связь с Ollama прерывалась во время загрузки модели. После нескольких попыток загрузка не завершилась. Проверьте подключение к интернету и свободное место, затем нажмите «Повторить установку».".into()
 }
 
 fn ollama_pull_http_error(response: reqwest::blocking::Response, status: u16) -> String {
@@ -1630,22 +1698,24 @@ fn ollama_pull_http_error(response: reqwest::blocking::Response, status: u16) ->
 fn read_ollama_pull_stream(
     mut response: reqwest::blocking::Response,
     app: &tauri::AppHandle,
-) -> Result<(), String> {
+) -> Result<(), OllamaPullStreamError> {
     let mut tracker = OllamaPullProgressTracker::default();
     let mut read_buffer = [0_u8; 8 * 1024];
     let mut line = Vec::with_capacity(1024);
 
     loop {
-        super::ollama_setup::check_setup_cancelled()?;
+        super::ollama_setup::check_setup_cancelled().map_err(OllamaPullStreamError::Failed)?;
         let read = match response.read(&mut read_buffer) {
             Ok(read) => read,
             Err(error) if error.kind() == io::ErrorKind::TimedOut => {
-                super::ollama_setup::check_setup_cancelled()?;
+                super::ollama_setup::check_setup_cancelled()
+                    .map_err(OllamaPullStreamError::Failed)?;
                 continue;
             }
             Err(_) => {
-                super::ollama_setup::check_setup_cancelled()?;
-                return Err("Не удалось прочитать поток загрузки Ollama.".into());
+                super::ollama_setup::check_setup_cancelled()
+                    .map_err(OllamaPullStreamError::Failed)?;
+                return Err(OllamaPullStreamError::Interrupted);
             }
         };
         if read == 0 {
@@ -1657,7 +1727,9 @@ fn read_ollama_pull_stream(
                 if line.last() == Some(&b'\r') {
                     line.pop();
                 }
-                if process_ollama_pull_line(&line, app, &mut tracker)? {
+                if process_ollama_pull_line(&line, app, &mut tracker)
+                    .map_err(OllamaPullStreamError::Failed)?
+                {
                     return Ok(());
                 }
                 line.clear();
@@ -1673,10 +1745,12 @@ fn read_ollama_pull_stream(
     if line.last() == Some(&b'\r') {
         line.pop();
     }
-    if process_ollama_pull_line(&line, app, &mut tracker)? {
+    if process_ollama_pull_line(&line, app, &mut tracker)
+        .map_err(OllamaPullStreamError::Failed)?
+    {
         return Ok(());
     }
-    Err("Поток Ollama завершился до окончания загрузки модели.".into())
+    Err(OllamaPullStreamError::Interrupted)
 }
 
 fn process_ollama_pull_line(
