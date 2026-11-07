@@ -1594,9 +1594,9 @@ function renderOllamaSetup() {
 
   if (settingsOllamaMemoryBytes) {
     const memoryGb = Math.round(settingsOllamaMemoryBytes / 1_000_000_000);
-    ui.ollamaSetupMemory.textContent = `Оперативная память устройства: около ${memoryGb} ГБ.`;
+    ui.ollamaSetupMemory.textContent = `Память: около ${memoryGb} ГБ.`;
   } else {
-    ui.ollamaSetupMemory.textContent = 'Не удалось определить объём оперативной памяти устройства.';
+    ui.ollamaSetupMemory.textContent = 'Объём памяти не определён.';
   }
 
   const recommendedModels = allModelsForRecommendation(settingsOllamaRecommendation);
@@ -1622,10 +1622,10 @@ function renderOllamaSetup() {
     ui.installOllamaFromSettings.textContent = 'Установить Ollama и скачать модель';
   }
   ui.ollamaSetupNote.textContent = selected
-    ? `${selected.tag}: ${selected.comparison}. Загрузка около ${selected.size}. Оценка приблизительная: скорость зависит от CPU/GPU и размера контекста; для загрузки нужен интернет.`
+    ? selected.comparison
     : settingsOllamaMemoryBytes
-      ? 'Для доступной рекомендации требуется не менее 8 ГБ оперативной памяти.'
-      : 'Выбор модели и установка недоступны без данных об оперативной памяти.';
+      ? 'Нет подходящих моделей для этого устройства.'
+      : 'Не удалось подобрать модель.';
   customSelects.refresh();
 }
 

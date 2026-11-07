@@ -305,12 +305,11 @@
             <h2 id="ollamaSetupDialogTitle">Подбор оптимальной модели</h2>
             <button class="modal-close" id="closeOllamaSetup" type="button" aria-label="Закрыть"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg></button>
           </div>
-          <section class="ollama-setup" id="ollamaSetup" aria-labelledby="ollamaSetupTitle">
-            <h3 id="ollamaSetupTitle">Выбрать модель Ollama</h3>
-            <p>Модели работают локально. Можно скачать другую модель, даже если на устройстве уже установлена одна.</p>
+          <section class="ollama-setup" id="ollamaSetup" aria-labelledby="ollamaSetupDialogTitle">
+            <p>Ollama работает локально.</p>
             <p class="ollama-setup-memory" id="ollamaSetupMemory" aria-live="polite"></p>
             <label class="codex-field" for="ollamaSetupModel">
-              <span>Подходящая модель</span>
+              <span>Модель</span>
               <select class="modal-input codex-select" id="ollamaSetupModel"></select>
             </label>
             <p class="ollama-setup-note" id="ollamaSetupNote"></p>
