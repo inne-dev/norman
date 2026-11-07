@@ -16,7 +16,7 @@ const MAX_CODEX_TEXT_BYTES = 512 * 1024;
 const MAX_CODEX_PROMPT_BYTES = 600 * 1024;
 const MAX_CODEX_OUTPUT_BYTES = 1024 * 1024;
 const MAX_CODEX_STATUS_OUTPUT_BYTES = 8 * 1024;
-const MAX_CODEX_RUN_TIME_MS = 75_000;
+const MAX_CODEX_RUN_TIME_MS = 150_000;
 const MAX_CODEX_TOTAL_TIME_MS = 8 * 60_000;
 const MAX_CODEX_STATUS_TIME_MS = 5_000;
 const MAX_CODEX_FINDINGS = 30;
@@ -132,7 +132,10 @@ function runProcess(program, args, { cwd, input, timeoutMs, maxOutputBytes, sign
       settled = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
-      if (error) reject(error);
+      if (error) {
+        if (error.code === 'ETIMEDOUT' && result) error.capturedStdout = result.stdout;
+        reject(error);
+      }
       else resolve(result);
     };
     const stop = (error) => {
@@ -294,9 +297,11 @@ async function runCodex(prompt, { model, reasoningEffort, schema, signal, deadli
 
     const remainingTime = deadline - Date.now();
     if (remainingTime <= 0) throw processFailure('Codex request timed out.', 'ETIMEDOUT');
-    const result = await runCodexCli([
-      'exec',
-      '--ephemeral',
+    const timeBudget = Math.min(MAX_CODEX_RUN_TIME_MS, remainingTime);
+    const firstTimeoutMs = Math.ceil(timeBudget / 2);
+    const resumeTimeoutMs = timeBudget - firstTimeoutMs;
+    const baseArgs = [
+      '--json',
       '--ignore-user-config',
       '--skip-git-repo-check',
       '--cd', workingDirectory,
@@ -308,27 +313,66 @@ async function runCodex(prompt, { model, reasoningEffort, schema, signal, deadli
       '--output-schema', schemaPath,
       '--output-last-message', outputPath,
       '--color', 'never',
-      '-',
-    ], {
+    ];
+    const run = (args, input, timeoutMs) => runCodexCli(args, {
       cwd: workingDirectory,
-      input: prompt,
-      timeoutMs: Math.min(MAX_CODEX_RUN_TIME_MS, remainingTime),
+      input,
+      timeoutMs,
       maxOutputBytes: MAX_CODEX_OUTPUT_BYTES,
       signal,
     });
+    const readResult = async () => {
+      const outputInfo = await stat(outputPath).catch(() => null);
+      if (!outputInfo || outputInfo.size > MAX_CODEX_OUTPUT_BYTES) {
+        throw processFailure('Codex CLI returned invalid output.', 'EOUTPUT');
+      }
+      return JSON.parse(await readFile(outputPath, 'utf8'));
+    };
+
+    let result;
+    try {
+      result = await run(['exec', ...baseArgs, '-'], prompt, firstTimeoutMs);
+    } catch (error) {
+      if (error.code !== 'ETIMEDOUT' || signal?.aborted) throw error;
+
+      const completedOutput = await readResult().catch(() => null);
+      if (completedOutput !== null) return completedOutput;
+
+      const threadId = codexThreadId(error.capturedStdout);
+      const resumeTime = Math.min(resumeTimeoutMs, deadline - Date.now());
+      if (!threadId || resumeTime <= 0) throw error;
+
+      await rm(outputPath, { force: true });
+      result = await run([
+        'exec', 'resume', ...baseArgs,
+        threadId,
+        '-',
+      ], 'Продолжи предыдущую задачу в этой сессии с того места, где остановился. Не начинай её заново. Заверши исходный запрос и верни полный результат строго по указанной JSON-схеме.', resumeTime);
+    }
 
     if (result.code !== 0) throw processFailure('Codex CLI returned an error.', 'ECODEX');
-    const outputInfo = await stat(outputPath).catch(() => null);
-    if (!outputInfo || outputInfo.size > MAX_CODEX_OUTPUT_BYTES) {
-      throw processFailure('Codex CLI returned invalid output.', 'EOUTPUT');
-    }
-    return JSON.parse(await readFile(outputPath, 'utf8'));
+    return readResult();
   } finally {
     await Promise.all([
       rm(workingDirectory, { recursive: true, force: true }),
       resourcesDirectory && rm(resourcesDirectory, { recursive: true, force: true }),
     ].filter(Boolean));
   }
+}
+
+function codexThreadId(output) {
+  if (typeof output !== 'string') return null;
+  for (const line of output.split(/\r?\n/)) {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const threadId = event?.type === 'thread.started' ? event.thread_id : null;
+    if (typeof threadId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(threadId)) return threadId;
+  }
+  return null;
 }
 
 async function readCodexPayload(req) {
@@ -392,7 +436,7 @@ function validateCodexFinding(value, text, rules) {
   ) {
     throw new AdapterError(400, 'Фрагмент совпадения не соответствует исходному тексту.');
   }
-  return {
+  const finding = {
     id: value.id,
     ruleId: value.ruleId,
     factor: value.factor,
@@ -403,6 +447,32 @@ function validateCodexFinding(value, text, rules) {
     reason: value.reason,
     confidence: value.confidence,
   };
+  if (hasValidCachedCodexReview(value)) {
+    finding.aiConfidence = value.aiConfidence;
+    finding.aiRationale = value.aiRationale;
+    if (value.aiRejectionReason?.trim()) finding.aiRejectionReason = value.aiRejectionReason.trim();
+  }
+  return finding;
+}
+
+function hasValidCachedCodexReview(finding) {
+  if (
+    !CODEX_CONFIDENCES.includes(finding?.aiConfidence) ||
+    typeof finding.aiRationale !== 'string' || !finding.aiRationale.trim() ||
+    Buffer.byteLength(finding.aiRationale, 'utf8') > 1024 ||
+    Array.from(finding.aiRationale).length > 500
+  ) return false;
+
+  if (finding.aiConfidence === 'likely_false') {
+    return typeof finding.aiRejectionReason === 'string'
+      && Boolean(finding.aiRejectionReason.trim())
+      && Array.from(finding.aiRejectionReason).length <= 120;
+  }
+
+  return ['low', 'medium', 'high'].includes(finding.aiConfidence)
+    && (finding.aiRejectionReason == null || (
+      typeof finding.aiRejectionReason === 'string' && !finding.aiRejectionReason.trim()
+    ));
 }
 
 function validateCodexOptions(payload) {
@@ -1171,12 +1241,19 @@ async function handleCodexAnalyze(req, res) {
     if (controller.signal.aborted) return;
 
     const deadline = Date.now() + MAX_CODEX_TOTAL_TIME_MS;
-    const codexFindings = [];
+    const codexFindings = findings
+      .filter(hasValidCachedCodexReview)
+      .map((finding) => ({ ...finding, origin: 'algorithm' }));
+    const pendingFindings = findings.filter((finding) => !hasValidCachedCodexReview(finding));
+    const algorithmicFindings = findings.map((finding) => {
+      const { aiConfidence, aiRationale, aiRejectionReason, ...baseline } = finding;
+      return baseline;
+    });
     const codexAdditionalFindings = [];
     const activeFindingIds = new Set();
-    let completedVerifications = 0;
-    codexProgressEvent(res, 'verify', 0, findings.length, { activeFindingIds: [] });
-    const verificationTasks = findings.map((finding) => async (signal) => {
+    let completedVerifications = codexFindings.length;
+    codexProgressEvent(res, 'verify', completedVerifications, findings.length, { activeFindingIds: [] });
+    const verificationTasks = pendingFindings.map((finding) => async (signal) => {
       activeFindingIds.add(finding.id);
       codexProgressEvent(res, 'verify', completedVerifications, findings.length, {
         activeFindingIds: [...activeFindingIds],
@@ -1200,7 +1277,7 @@ async function handleCodexAnalyze(req, res) {
           origin: 'algorithm',
           aiConfidence: review.aiConfidence,
           aiRationale: review.aiRationale,
-          ...(review.signalSupported ? {} : { aiRejectionReason: review.rejectionReason.trim() }),
+          aiRejectionReason: review.signalSupported ? null : review.rejectionReason.trim(),
         };
         codexFindingEvent(res, codexFinding);
         completedVerifications += 1;
@@ -1256,7 +1333,7 @@ async function handleCodexAnalyze(req, res) {
         references.rulesText,
         references.methodText,
         scopedAiFactorsText,
-        findings,
+        algorithmicFindings,
         {
           factors: scope.factors,
           ruleIds: [...scope.ruleMap.keys()].sort(),
@@ -1287,7 +1364,7 @@ async function handleCodexAnalyze(req, res) {
       pauseControl,
     );
     if (controller.signal.aborted) return;
-    const seenFindings = findings.slice();
+    const seenFindings = algorithmicFindings.slice();
     for (const candidates of discoveryResults) {
       for (const candidate of candidates) {
         const finding = validateCodexDiscoveryCandidate(candidate, payload.text, references, seenFindings);

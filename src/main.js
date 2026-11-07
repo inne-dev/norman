@@ -146,6 +146,10 @@ const ui = {
   aiReviewTitle: document.querySelector('#aiReviewTitle'),
   closeAiReview: document.querySelector('#closeAiReview'),
   aiReviewSingleContent: document.querySelector('#aiReviewSingleContent'),
+  aiReviewLiveStatus: document.querySelector('#aiReviewLiveStatus'),
+  aiReviewLiveMessages: document.querySelector('#aiReviewLiveMessages'),
+  aiReviewLiveTyping: document.querySelector('#aiReviewLiveTyping'),
+  aiReviewResultSection: document.querySelector('#aiReviewResultSection'),
   aiReviewReasoningDetails: document.querySelector('#aiReviewReasoningDetails'),
   aiReviewResultsList: document.querySelector('#aiReviewResultsList'),
   aiReviewExcerpt: document.querySelector('#aiReviewExcerpt'),
@@ -2069,10 +2073,11 @@ function renderAiAnalysisNote() {
   ui.showPartialAiReview.hidden = state.aiAnalysis !== 'error'
     || state.aiProgress?.phase !== 'discover'
     || !state.findings.some(isAiFinding);
-  const retryable = state.aiAnalysis === 'error' || state.aiAnalysis === 'unavailable';
-  const retrying = state.aiAnalysis === 'checking' || state.aiAnalysis === 'running';
-  ui.retryAiAnalysis.hidden = state.analysis !== 'done' || (!retryable && !retrying);
-  ui.retryAiAnalysis.disabled = retrying || !codexSettings.enabled;
+  const canRetryAiAnalysis = state.analysis === 'done'
+    && (state.aiAnalysis === 'error' || state.aiAnalysis === 'unavailable')
+    && codexSettings.enabled;
+  ui.retryAiAnalysis.hidden = !canRetryAiAnalysis;
+  ui.retryAiAnalysis.disabled = !canRetryAiAnalysis;
 }
 
 function renderFindingsMessage() {
@@ -2148,12 +2153,12 @@ function renderAnalysisPauseControl() {
   const waiting = tab?.pauseState === 'pause-requested';
   const paused = tab?.pauseState === 'paused';
   const pauseError = tab?.pauseMessage;
-  ui.analysisPauseStatus.hidden = !busy || (!waiting && !paused && !pauseError);
+  ui.analysisPauseStatus.hidden = !busy || paused || (!waiting && !pauseError);
   ui.analysisPauseStatus.textContent = pauseError
     ? `Пауза недоступна: ${pauseError}`
     : waiting
     ? 'Ожидание безопасной точки паузы'
-    : paused ? 'Анализ приостановлен' : '';
+    : '';
 }
 
 async function setBrowserCodexPause(analysisId, paused, release = false) {
@@ -2225,15 +2230,18 @@ async function releaseAnalysisPause(tab, analysisId = tab.analysisPauseId) {
 }
 
 function renderProgress() {
+  renderAiReviewDialog();
   const codexBusy = state.aiAnalysis === 'checking' || state.aiAnalysis === 'running';
   const activeTab = tabById(state.activeId);
-  ui.analysisStatus.hidden = state.analysis !== 'running' && !codexBusy;
+  const paused = activeTab?.pauseState === 'paused';
+  ui.analysisStatus.hidden = paused || (state.analysis !== 'running' && !codexBusy);
 
   const showCodexProgress = codexSettings.enabled
     && Boolean(state.document)
     && state.analysis !== 'idle'
     && (state.analysis === 'running' || state.aiAnalysis !== 'idle');
   ui.analysisProgress.hidden = !showCodexProgress;
+  ui.analysisProgress.dataset.paused = String(paused);
   ui.analysisSlowWarning.hidden = !activeTab?.slowAnalysisWarning
     || (state.analysis !== 'running' && !codexBusy);
   renderAnalysisPauseControl();
@@ -2432,32 +2440,98 @@ function aiReviewConfidenceLabel(value) {
   })[aiConfidenceLevel(value)];
 }
 
+function findingVerifyStatus(key) {
+  const entries = state.findings.map((finding, index) => ({ finding, key: findingKey(finding, index) }));
+  return findingVerificationStatuses(entries).get(key) || null;
+}
+
 function openAiReview(key) {
-  const index = state.findings.findIndex((finding, itemIndex) => findingKey(finding, itemIndex) === key);
-  if (index < 0) return;
-  const finding = state.findings[index];
-  const providerLabel = aiProviderLabel(finding.aiProvider);
-  const confidence = aiConfidenceLevel(finding.aiConfidence);
+  if (!state.findings.some((finding, index) => findingKey(finding, index) === key)) return;
   ui.aiReviewSingleContent.hidden = false;
   ui.aiReviewResultsList.hidden = true;
   ui.aiReviewResultsList.replaceChildren();
   ui.aiReviewReasoningDetails.open = false;
-  ui.aiReviewTitle.textContent = `Оценка · ${providerLabel}`;
+  ui.aiReviewLiveStatus.dataset.findingKey = key;
+  ui.aiReviewLiveStatus.dataset.watching = String(['active', 'queued'].includes(findingVerifyStatus(key)));
+  ui.aiReviewLiveStatus.dataset.lastStage = '';
+  ui.aiReviewLiveMessages.replaceChildren();
+  ui.aiReviewDialog.showModal();
+  renderAiReviewDialog();
+}
+
+function renderAiReviewDialog() {
+  if (!ui.aiReviewDialog.open) return;
+  const key = ui.aiReviewLiveStatus.dataset.findingKey;
+  if (!key) return;
+  const index = state.findings.findIndex((finding, itemIndex) => findingKey(finding, itemIndex) === key);
+  if (index < 0) return;
+  const finding = state.findings[index];
+  const verifyStatus = findingVerifyStatus(key);
+  const isChecking = verifyStatus === 'active' || verifyStatus === 'queued';
+  const watching = ui.aiReviewLiveStatus.dataset.watching === 'true';
+  const providerLabel = aiProviderLabel(finding.aiProvider || codexSettings.provider);
+  const confidence = aiConfidenceLevel(finding.aiConfidence);
+  const hasResult = finding.aiConfidence != null || Boolean(finding.aiRationale || finding.aiRejectionReason);
+  ui.aiReviewTitle.textContent = `${isChecking ? 'Проверка' : 'Оценка'} · ${providerLabel}`;
   ui.aiReviewExcerpt.textContent = finding.excerpt || 'Фрагмент не сохранён.';
   const ruleExplanation = String(finding.reason || '').trim();
   ui.aiReviewRuleExplanation.textContent = ruleExplanation;
   ui.aiReviewRuleSection.hidden = !ruleExplanation;
+  ui.aiReviewResultSection.hidden = !hasResult;
+  ui.aiReviewConfidence.textContent = hasResult ? aiReviewConfidenceLabel(finding.aiConfidence) : 'Проверяется';
+  ui.aiReviewDecision.textContent = !hasResult
+    ? 'Ожидайте завершения проверки сигнала.'
+    : confidence === 'likely-false'
+      ? `${providerLabel} не подтвердил сигнал; при необходимости его можно проверить вручную.`
+      : 'Возможный сигнал; требуется экспертная проверка.';
   ui.aiReviewRationale.textContent = (confidence === 'likely-false' && finding.aiRejectionReason)
     || finding.aiRationale
     || 'Краткое обоснование не сохранено.';
-  ui.aiReviewConfidence.textContent = aiReviewConfidenceLabel(finding.aiConfidence);
-  ui.aiReviewDecision.textContent = confidence === 'likely-false'
-    ? `${providerLabel} не подтвердил сигнал; при необходимости его можно проверить вручную.`
-    : 'Возможный сигнал; требуется экспертная проверка.';
-  ui.aiReviewDialog.showModal();
+  ui.aiReviewReasoningDetails.hidden = !hasResult;
+
+  const activeTab = tabById(state.activeId);
+  const pauseRequested = activeTab?.pauseState === 'pause-requested';
+  const paused = activeTab?.pauseState === 'paused';
+  let message = '';
+  let stage = '';
+  if (verifyStatus === 'queued') {
+    stage = 'queued';
+    message = 'Сигнал ожидает свободного процесса проверки.';
+  } else if (verifyStatus === 'active' && pauseRequested) {
+    stage = 'pause-requested';
+    message = 'Пауза запрошена. Текущая проверка завершится перед остановкой.';
+  } else if (isChecking && paused) {
+    stage = 'paused';
+    message = 'Анализ приостановлен и продолжится после возобновления.';
+  } else if (verifyStatus === 'active') {
+    stage = 'active';
+    message = 'Модель проверяет сигнал по контексту документа.';
+  } else if (watching && hasResult) {
+    stage = 'complete';
+    message = 'Проверка завершена. Результат показан ниже.';
+  } else if (watching && state.aiAnalysis === 'running') {
+    stage = 'waiting';
+    message = 'Ожидаю результат проверки сигнала.';
+  } else if (watching && ['error', 'unavailable'].includes(state.aiAnalysis)) {
+    stage = 'error';
+    message = 'Проверка прервана до получения результата. Локальный сигнал сохранён.';
+  }
+  if (stage && ui.aiReviewLiveStatus.dataset.lastStage !== stage) {
+    const entry = document.createElement('li');
+    entry.className = 'ai-review-chat-message';
+    entry.textContent = message;
+    ui.aiReviewLiveMessages.append(entry);
+    ui.aiReviewLiveStatus.dataset.lastStage = stage;
+  }
+  ui.aiReviewLiveStatus.hidden = !isChecking && !(watching && (hasResult || stage));
+  ui.aiReviewLiveTyping.hidden = verifyStatus !== 'active' || paused;
 }
 
 function openAiReviewResults() {
+  ui.aiReviewLiveStatus.dataset.findingKey = '';
+  ui.aiReviewLiveStatus.dataset.watching = 'false';
+  ui.aiReviewLiveStatus.hidden = true;
+  ui.aiReviewLiveTyping.hidden = true;
   const findings = state.findings.filter(isAiFinding);
   if (!findings.length) return;
 
@@ -2577,7 +2651,37 @@ function syncFindingRow(item, finding, verifyStatus) {
   if (wasExpanded !== expanded) {
     setFindingDetailsExpanded(item.querySelector('.finding-details'), expanded);
   }
-  setFindingVerifyStatus(item, finding, findingRowData(finding), verifyStatus);
+  const data = findingRowData(finding);
+  syncFindingReviewControl(item, item.dataset.findingKey, finding, data, verifyStatus);
+  setFindingVerifyStatus(item, finding, data, verifyStatus);
+}
+
+function syncFindingReviewControl(item, key, finding, data, verifyStatus) {
+  const meta = item.querySelector('.finding-meta');
+  let control = meta.querySelector('.finding-origin');
+  const show = data.aiFinding || verifyStatus === 'active';
+  if (!show) {
+    control?.remove();
+    return;
+  }
+  if (!control) {
+    control = document.createElement('button');
+    control.type = 'button';
+    control.className = 'finding-origin';
+    control.dataset.aiReviewFinding = key;
+    control.setAttribute('aria-haspopup', 'dialog');
+    meta.append(control);
+  }
+  const providerLabel = aiProviderLabel(data.aiProvider || codexSettings.provider);
+  control.textContent = data.aiFinding
+    ? providerLabel === 'ChatGPT (Codex)' ? 'Codex' : providerLabel
+    : 'Проверяется';
+  control.title = data.aiFinding
+    ? 'Показать входные данные и результат проверки'
+    : 'Показать ход проверки сигнала';
+  control.setAttribute('aria-label', data.aiFinding
+    ? `Показать данные проверки ${providerLabel}`
+    : 'Показать ход проверки сигнала');
 }
 
 function createFindingRow(finding, key, verifyStatus, data = findingRowData(finding)) {
@@ -2610,19 +2714,6 @@ function createFindingRow(finding, key, verifyStatus, data = findingRowData(find
   const meta = document.createElement('div');
   meta.className = 'finding-meta';
   meta.append(location);
-  if (data.aiFinding) {
-    const origin = document.createElement('button');
-    origin.type = 'button';
-    origin.className = 'finding-origin';
-    origin.dataset.aiReviewFinding = key;
-    origin.setAttribute('aria-haspopup', 'dialog');
-    origin.title = 'Показать входные данные и результат проверки';
-    const providerLabel = aiProviderLabel(data.aiProvider);
-    origin.textContent = providerLabel === 'ChatGPT (Codex)' ? 'Codex' : providerLabel;
-    origin.setAttribute('aria-label', `Показать данные проверки ${providerLabel}`);
-    meta.append(origin);
-  }
-
   const title = document.createElement('strong');
   title.className = 'finding-title';
   title.textContent = data.shortTitle;
@@ -2661,6 +2752,7 @@ function createFindingRow(finding, key, verifyStatus, data = findingRowData(find
     details.append(aiExplanation);
   }
   item.append(button, details);
+  syncFindingReviewControl(item, key, finding, data, verifyStatus);
   setFindingVerifyStatus(item, finding, data, verifyStatus);
   return item;
 }
@@ -3434,6 +3526,15 @@ ui.welcomeDialog.addEventListener('click', (event) => {
 });
 ui.closeSettings.addEventListener('click', () => ui.settingsDialog.close());
 ui.closeAiReview.addEventListener('click', () => ui.aiReviewDialog.close());
+ui.aiReviewDialog.addEventListener('close', () => {
+  ui.aiReviewLiveStatus.dataset.findingKey = '';
+  ui.aiReviewLiveStatus.dataset.watching = 'false';
+  ui.aiReviewLiveStatus.dataset.lastStage = '';
+  ui.aiReviewLiveStatus.hidden = true;
+  ui.aiReviewLiveTyping.hidden = true;
+  ui.aiReviewLiveMessages.replaceChildren();
+  ui.aiReviewReasoningDetails.open = false;
+});
 ui.showPartialAiReview.addEventListener('click', openAiReviewResults);
 ui.aiReviewDialog.addEventListener('click', (event) => {
   if (event.target === ui.aiReviewDialog) ui.aiReviewDialog.close();

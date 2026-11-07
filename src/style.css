@@ -1076,6 +1076,77 @@ main {
   gap: 8px;
 }
 
+.ai-review-live {
+  padding: 14px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+}
+
+.ai-review-chat {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ai-review-chat-message {
+  max-width: 100%;
+  padding: 9px 12px;
+  color: var(--text-body);
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px 12px 12px 4px;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  animation: ai-review-message-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.ai-review-live-typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.ai-review-typing-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 16px;
+}
+
+.ai-review-typing-dots i {
+  width: 5px;
+  height: 5px;
+  background: var(--muted-strong);
+  border-radius: 50%;
+  animation: ai-review-typing-pulse 1s ease-in-out infinite;
+}
+
+.ai-review-typing-dots i:nth-child(2) {
+  animation-delay: 120ms;
+}
+
+.ai-review-typing-dots i:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+@keyframes ai-review-message-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes ai-review-typing-pulse {
+  0%, 60%, 100% { opacity: 0.38; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+
 .ai-review-section h3 {
   margin: 0;
   color: var(--text);
@@ -2133,17 +2204,30 @@ p {
   stroke-width: 1.8;
 }
 
+.analysis-pause-button svg[hidden] {
+  display: none;
+}
+
+.analysis-pause-button [data-resume-icon] {
+  fill: currentColor;
+  stroke: none;
+}
+
 .analysis-pause-button[hidden],
 .analysis-pause-status[hidden] {
   display: none;
 }
 
 .analysis-pause-status {
-  max-width: 168px;
+  min-width: 0;
+  max-width: 104px;
+  flex: 0 1 104px;
   color: var(--muted);
   font-size: 10px;
   line-height: 1.25;
   text-align: right;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .confidence-legend-popover {
@@ -2267,6 +2351,10 @@ p {
 
 .analysis-progress-segment[data-state="running"] .analysis-progress-segment-fill {
   background: var(--confidence-medium);
+}
+
+.analysis-progress[data-paused="true"] .analysis-progress-segment[data-state="running"] .analysis-progress-segment-fill {
+  background: var(--focus);
 }
 
 .analysis-progress-segment[data-state="error"] .analysis-progress-segment-fill {
