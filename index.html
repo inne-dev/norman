@@ -80,7 +80,7 @@
             <span>Открываем источник…</span>
           </div>
         </div>
-        <button class="text-button start-welcome-trigger" id="openWelcome" type="button">Привет</button>
+        <button class="text-button start-welcome-trigger" id="openWelcome" type="button">Добро пожаловать</button>
       </main>
 
       <dialog class="modal welcome-modal" id="welcomeDialog" aria-labelledby="welcomeTitle" aria-describedby="welcomeDescription">
@@ -206,9 +206,10 @@
                 <span>Провайдер</span>
                 <select class="modal-input codex-select" id="codexProvider">
                   <option value="codex">ChatGPT (Codex)</option>
+                  <option value="claude">Claude Code</option>
                   <option value="ollama">Ollama</option>
-                  <option value="cloudru">Cloud.ru Foundation Models</option>
-                  <option value="yandex">Yandex AI Studio</option>
+                  <option value="cloudru" data-badge="Бета">Cloud.ru Foundation Models</option>
+                  <option value="yandex" data-badge="Бета">Yandex AI Studio</option>
                 </select>
               </div>
               <div class="codex-provider-options" id="codexProviderOptions">
@@ -233,7 +234,31 @@
                   <button class="button button-secondary" id="checkCodexStatus" type="button">Проверить</button>
                 </div>
               </div>
+              <div class="codex-provider-options" id="claudeOptions" hidden>
+                <p class="codex-privacy-note">Claude Code сохраняет сессии локально, чтобы продолжить запрос после сбоя.</p>
+                <div class="codex-field">
+                  <span>Модель Claude</span>
+                  <select class="modal-input codex-select" id="claudeModel">
+                    <option value="sonnet">Sonnet</option>
+                    <option value="opus">Opus</option>
+                    <option value="haiku">Haiku</option>
+                  </select>
+                </div>
+                <div class="codex-field">
+                  <span>Уровень рассуждения</span>
+                  <select class="modal-input codex-select" id="claudeReasoning">
+                    <option value="low">Низкое</option>
+                    <option value="medium">Среднее</option>
+                    <option value="high">Высокое</option>
+                  </select>
+                </div>
+                <div class="codex-status-row">
+                  <p id="claudeStatus" role="status" aria-live="polite">Статус Claude Code ещё не проверен.</p>
+                  <button class="button button-secondary" id="checkClaudeStatus" type="button">Проверить</button>
+                </div>
+              </div>
               <div class="codex-provider-options" id="ollamaOptions" hidden>
+                <p class="codex-privacy-note codex-warning-note" role="note">Скорость и качество обработки через Ollama сильно зависят от мощности устройства.</p>
                 <label class="codex-field codex-field-text" for="ollamaBaseUrl">
                   <span>Адрес Ollama</span>
                   <span class="ollama-address-control" id="ollamaAddressControl">
@@ -276,13 +301,14 @@
               <div class="codex-provider-options" id="yandexOptions" hidden>
                 <label class="codex-field codex-field-text" for="yandexApiKey">
                   <span>API-ключ Yandex AI Studio</span>
-                  <input class="modal-input codex-select" id="yandexApiKey" type="password" autocomplete="off" spellcheck="false" />
+                  <input class="modal-input codex-select" id="yandexApiKey" type="password" autocomplete="off" spellcheck="false" aria-describedby="yandexApiKeyNote" />
                 </label>
+                <p class="codex-privacy-note codex-warning-note" id="yandexApiKeyNote" role="note">Нужна роль ai.languageModels.user и области ключа yc.ai.models.viewer, yc.ai.foundationModels.execute. Текст документа и сигналы передаются в Yandex AI Studio. Ключ хранится до закрытия приложения.</p>
                 <label class="codex-field codex-field-text" for="yandexFolderId">
                   <span>ID каталога Yandex Cloud</span>
-                  <input class="modal-input codex-select" id="yandexFolderId" type="text" autocomplete="off" spellcheck="false" />
+                  <input class="modal-input codex-select" id="yandexFolderId" type="text" autocomplete="off" spellcheck="false" aria-describedby="yandexFolderIdNote" />
                 </label>
-                <p class="codex-privacy-note">Нужна роль ai.languageModels.user и области ключа yc.ai.models.viewer, yc.ai.foundationModels.execute. Текст документа и сигналы передаются в Yandex AI Studio. Ключ хранится до закрытия приложения, ID каталога сохраняется в настройках.</p>
+                <p class="codex-privacy-note codex-warning-note" id="yandexFolderIdNote" role="note">ID каталога сохраняется в настройках.</p>
                 <div class="codex-field">
                   <span>Модель</span>
                   <select class="modal-input codex-select" id="yandexModel" disabled>
@@ -344,16 +370,17 @@
           </div>
           <div class="ai-review-content" id="aiReviewSingleContent">
             <section class="ai-review-section ai-review-live" id="aiReviewLiveStatus" aria-labelledby="aiReviewLiveTitle" hidden>
-              <h3 id="aiReviewLiveTitle">Проверка сигнала</h3>
+              <h3 id="aiReviewLiveTitle">Ход проверки</h3>
               <ol class="ai-review-chat" id="aiReviewLiveMessages" role="log" aria-live="polite" aria-relevant="additions text"></ol>
               <div class="ai-review-live-typing" id="aiReviewLiveTyping" role="status" hidden>
                 <span class="ai-review-typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-                <span>Модель проверяет сигнал</span>
+                <span class="ai-review-typing-label">Модель готовит первую оценку</span>
               </div>
             </section>
             <section class="ai-review-section" id="aiReviewResultSection" aria-labelledby="aiReviewResultTitle">
               <h3 id="aiReviewResultTitle">Итог</h3>
-              <div class="ai-review-result">
+              <div class="ai-review-result ai-review-confidence-result">
+                <span class="confidence-indicator" id="aiReviewConfidenceMarker" aria-hidden="true"></span>
                 <strong id="aiReviewConfidence"></strong>
               </div>
               <p class="ai-review-decision" id="aiReviewDecision"></p>

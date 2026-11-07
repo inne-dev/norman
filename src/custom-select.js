@@ -1,4 +1,5 @@
 const PROVIDER_ICONS = {
+  claude: '/provider-logos/claude.svg',
   ollama: '/provider-logos/ollama.svg',
   cloudru: '/provider-logos/cloudru.svg',
   yandex: '/provider-logos/yandex.svg',
@@ -167,6 +168,12 @@ function enhanceSelect(select) {
       text.className = 'custom-select-label';
       text.textContent = option.label || option.textContent || '';
       item.append(text);
+      if (option.dataset.badge) {
+        const badge = document.createElement('span');
+        badge.className = 'custom-select-badge';
+        badge.textContent = option.dataset.badge;
+        item.append(badge);
+      }
       return item;
     }));
 

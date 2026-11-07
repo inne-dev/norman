@@ -13,6 +13,7 @@ import { generateReportPdf } from './report-pdf.js';
 import './style.css';
 
 const isTauri = Boolean(window.__TAURI_INTERNALS__);
+const isBrowserOllamaDev = !isTauri && import.meta.env.DEV;
 const releaseTag = import.meta.env.VITE_APP_VERSION || '';
 const displayedAppVersion = releaseTag || packageInfo.version;
 const THEME_STORAGE_KEY = 'norman-color-theme';
@@ -23,6 +24,8 @@ const DEFAULT_CODEX_SETTINGS = Object.freeze({
   provider: 'codex',
   model: 'gpt-6-luna',
   reasoningEffort: 'high',
+  claudeModel: 'sonnet',
+  claudeReasoningEffort: 'high',
   ollamaBaseUrl: 'http://127.0.0.1:11434',
   ollamaModel: '',
   cloudRuModel: '',
@@ -43,6 +46,7 @@ const state = {
   analysis: 'idle',
   aiAnalysis: 'idle',
   aiAnalysisMessage: '',
+  aiFailure: null,
   aiProgress: null,
   progress: null,
   loadError: '',
@@ -64,6 +68,8 @@ let rejectedFindingsCount = null;
 let renderedFindingsOrderSignature = '';
 let codexStatus = { checked: false, installed: false, authenticated: false, version: '', message: '' };
 let codexStatusRequest = null;
+let claudeStatus = { checked: false, installed: false, authenticated: false, version: '', message: '' };
+let claudeStatusRequest = null;
 let ollamaStatus = { checked: false, installed: false, available: false, models: [], message: '' };
 let ollamaStatusRequestId = 0;
 let ollamaStarting = false;
@@ -78,6 +84,7 @@ let welcomeInstallInProgress = false;
 let welcomeInstallComplete = false;
 let ollamaInstallInProgress = false;
 let ollamaInstallCancellationRequested = false;
+let ollamaBrowserInstallController = null;
 let settingsOllamaMemoryChecked = false;
 let settingsOllamaMemoryBytes = null;
 let settingsOllamaRecommendation = null;
@@ -157,6 +164,7 @@ const ui = {
   aiReviewRuleExplanation: document.querySelector('#aiReviewRuleExplanation'),
   aiReviewRationale: document.querySelector('#aiReviewRationale'),
   aiReviewConfidence: document.querySelector('#aiReviewConfidence'),
+  aiReviewConfidenceMarker: document.querySelector('#aiReviewConfidenceMarker'),
   aiReviewDecision: document.querySelector('#aiReviewDecision'),
   codexEnabled: document.querySelector('#codexEnabled'),
   filterAdsInPreview: document.querySelector('#filterAdsInPreview'),
@@ -165,6 +173,11 @@ const ui = {
   codexProviderOptions: document.querySelector('#codexProviderOptions'),
   codexModel: document.querySelector('#codexModel'),
   codexReasoning: document.querySelector('#codexReasoning'),
+  claudeOptions: document.querySelector('#claudeOptions'),
+  claudeModel: document.querySelector('#claudeModel'),
+  claudeReasoning: document.querySelector('#claudeReasoning'),
+  claudeStatus: document.querySelector('#claudeStatus'),
+  checkClaudeStatus: document.querySelector('#checkClaudeStatus'),
   ollamaOptions: document.querySelector('#ollamaOptions'),
   ollamaBaseUrl: document.querySelector('#ollamaBaseUrl'),
   ollamaAddressControl: document.querySelector('#ollamaAddressControl'),
@@ -253,13 +266,19 @@ function loadCodexSettings() {
       ...saved,
       enabled: saved.enabled === true,
       filterAdsInPreview: saved.filterAdsInPreview !== false,
-      provider: ['ollama', 'cloudru', 'yandex'].includes(saved.provider) ? saved.provider : 'codex',
+      provider: ['claude', 'ollama', 'cloudru', 'yandex'].includes(saved.provider) ? saved.provider : 'codex',
       model: ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra'].includes(saved.model)
         ? saved.model
         : DEFAULT_CODEX_SETTINGS.model,
       reasoningEffort: ['low', 'medium', 'high'].includes(saved.reasoningEffort)
         ? saved.reasoningEffort
         : DEFAULT_CODEX_SETTINGS.reasoningEffort,
+      claudeModel: ['sonnet', 'opus', 'haiku'].includes(saved.claudeModel)
+        ? saved.claudeModel
+        : DEFAULT_CODEX_SETTINGS.claudeModel,
+      claudeReasoningEffort: ['low', 'medium', 'high'].includes(saved.claudeReasoningEffort)
+        ? saved.claudeReasoningEffort
+        : DEFAULT_CODEX_SETTINGS.claudeReasoningEffort,
       ollamaBaseUrl: typeof saved.ollamaBaseUrl === 'string' && saved.ollamaBaseUrl.trim()
         ? saved.ollamaBaseUrl.trim()
         : DEFAULT_CODEX_SETTINGS.ollamaBaseUrl,
@@ -294,6 +313,10 @@ function syncCodexSettingsUI() {
   ui.codexProviderOptions.hidden = codexSettings.provider !== 'codex';
   ui.codexModel.value = codexSettings.model;
   ui.codexReasoning.value = codexSettings.reasoningEffort;
+  ui.claudeOptions.hidden = codexSettings.provider !== 'claude';
+  ui.claudeModel.value = codexSettings.claudeModel;
+  ui.claudeReasoning.value = codexSettings.claudeReasoningEffort;
+  renderClaudeStatus();
   ui.ollamaOptions.hidden = codexSettings.provider !== 'ollama';
   ui.ollamaBaseUrl.value = codexSettings.ollamaBaseUrl;
   renderOllamaStatus();
@@ -316,9 +339,10 @@ function renderHeaderAiStatus() {
   const icon = makeProviderIcon(codexSettings.provider, 'custom-select-icon');
   ui.headerAiProviderIcon.replaceChildren(...(icon ? [icon] : []));
 
-  const reasoning = codexSettings.provider === 'codex'
-    ? ui.codexReasoning.selectedOptions[0]?.textContent?.trim() || ''
-    : '';
+  const reasoningControl = codexSettings.provider === 'codex'
+    ? ui.codexReasoning
+    : codexSettings.provider === 'claude' ? ui.claudeReasoning : null;
+  const reasoning = reasoningControl?.selectedOptions[0]?.textContent?.trim() || '';
   ui.headerAiReasoning.hidden = !reasoning;
   ui.headerAiReasoning.textContent = reasoning;
 
@@ -535,10 +559,82 @@ function throwIfOllamaSetupCancelled() {
   throw error;
 }
 
+async function installOllamaModelInBrowser(selected, onStatus, onProgress) {
+  const baseUrl = codexSettings.ollamaBaseUrl.trim() || DEFAULT_CODEX_SETTINGS.ollamaBaseUrl;
+  const controller = new AbortController();
+  ollamaBrowserInstallController = controller;
+  try {
+    onStatus('Запускаем локальную Ollama…');
+    await requestBrowserOllama('/__norman/ollama/start', { baseUrl }, controller.signal);
+    throwIfOllamaSetupCancelled();
+    onStatus(`Скачиваем ${selected.name} (${selected.size})…`);
+    renderOllamaDownloadStatus(selected);
+    const response = await fetch('/__norman/ollama/pull', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { Accept: 'application/x-ndjson', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseUrl, model: selected.tag }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({}));
+      throw new Error(failure.error || `HTTP ${response.status}`);
+    }
+    const handleLine = (line) => {
+      if (!line.trim()) return;
+      let event;
+      try { event = JSON.parse(line); } catch { throw new Error('Поток загрузки Ollama имеет неверный формат.'); }
+      if (event.type === 'error') throw new Error(event.payload?.message || 'Не удалось загрузить модель Ollama.');
+      if (event.type !== 'progress' && event.type !== 'complete') return;
+      const payload = event.payload || {};
+      onProgress(payload, 'pull');
+      renderOllamaDownloadStatus(selected, payload);
+      onStatus(Number.isFinite(payload.total) && payload.total > 0
+        ? `${humanizeOllamaPullStatus(payload.status)} ${formatDownloadedBytes(payload.completed)} из ${formatDownloadedBytes(payload.total)}`
+        : humanizeOllamaPullStatus(payload.status));
+    };
+    if (response.body?.getReader) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let pending = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        pending += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const lines = pending.split('\n');
+        pending = lines.pop() || '';
+        for (const line of lines) handleLine(line);
+        if (done) break;
+      }
+      if (pending.trim()) handleLine(pending);
+    } else {
+      for (const line of (await response.text()).split('\n')) handleLine(line);
+    }
+    throwIfOllamaSetupCancelled();
+    const installedStatus = await requestBrowserOllama('/__norman/ollama/status', { baseUrl });
+    if (!Array.isArray(installedStatus.models) || !installedStatus.models.includes(selected.tag)) {
+      throw new Error('Загрузка завершилась, но модель не появилась в списке Ollama. Повторите загрузку.');
+    }
+    return installedStatus;
+  } catch (error) {
+    if (ollamaInstallCancellationRequested || error?.name === 'AbortError') throwIfOllamaSetupCancelled();
+    throw error;
+  } finally {
+    if (ollamaBrowserInstallController === controller) ollamaBrowserInstallController = null;
+  }
+}
+
 async function installOllamaModel(selected, onStatus, onProgress) {
-  if (!isTauri || ollamaInstallInProgress) throw new Error('Установка Ollama уже выполняется.');
+  if ((!isTauri && !isBrowserOllamaDev) || ollamaInstallInProgress) throw new Error('Установка Ollama уже выполняется.');
   ollamaInstallInProgress = true;
   ollamaInstallCancellationRequested = false;
+  if (!isTauri) {
+    try {
+      return await installOllamaModelInBrowser(selected, onStatus, onProgress);
+    } finally {
+      hideOllamaDownloadStatus();
+      ollamaInstallInProgress = false;
+    }
+  }
   let stopInstallListening = () => {};
   let stopPullListening = () => {};
   try {
@@ -742,6 +838,7 @@ function saveActiveTab() {
   tab.progress = state.progress;
   tab.aiAnalysis = state.aiAnalysis;
   tab.aiAnalysisMessage = state.aiAnalysisMessage;
+  tab.aiFailure = state.aiFailure;
   tab.aiProgress = state.aiProgress;
 }
 
@@ -756,6 +853,7 @@ function activateTab(tab) {
   state.progress = tab.progress;
   state.aiAnalysis = tab.aiAnalysis || 'idle';
   state.aiAnalysisMessage = tab.aiAnalysisMessage || '';
+  state.aiFailure = tab.aiFailure || null;
   state.aiProgress = tab.aiProgress || null;
   clearPageFrame();
   state.loadError = '';
@@ -766,6 +864,10 @@ function createDocumentTab(document) {
     id: `document-${nextTabId++}`,
     document,
     findings: [],
+    aiReviewUpdates: new Map(),
+    aiReviewStreams: new Map(),
+    aiReviewOutputs: new Map(),
+    aiReviewAbortController: null,
     selectedId: null,
     analysis: 'idle',
     analysisError: '',
@@ -777,6 +879,7 @@ function createDocumentTab(document) {
     progress: null,
     aiAnalysis: 'idle',
     aiAnalysisMessage: '',
+    aiFailure: null,
     aiProgress: null,
     pauseState: 'running',
     analysisPauseId: null,
@@ -877,7 +980,9 @@ function closeDocumentTab(id) {
   if (state.activeId === id) saveActiveTab();
   const [closedTab] = state.tabs.splice(index, 1);
   resetSlowAnalysisWarning(closedTab);
-  void releaseAnalysisPause(closedTab);
+  closedTab.aiReviewAbortController?.abort();
+  closedTab.aiReviewAbortController = null;
+  void cancelAiAnalysis(closedTab).finally(() => releaseAnalysisPause(closedTab));
   closedTab.analysisToken += 1;
 
   if (state.activeId === id) {
@@ -1492,6 +1597,82 @@ async function refreshCodexStatus() {
   return codexStatusRequest;
 }
 
+function renderClaudeStatus() {
+  const available = claudeStatus.checked
+    && claudeStatus.installed
+    && claudeStatus.authenticated
+    && !claudeStatus.checking;
+  ui.claudeModel.disabled = !available;
+  ui.claudeReasoning.disabled = !available;
+  if (claudeStatus.checking) {
+    ui.claudeStatus.textContent = 'Проверяем доступность Claude Code…';
+    ui.claudeStatus.dataset.state = 'loading';
+  } else if (!isTauri) {
+    ui.claudeStatus.textContent = 'Claude Code CLI доступен в настольном приложении.';
+    ui.claudeStatus.dataset.state = 'idle';
+  } else if (!claudeStatus.checked) {
+    ui.claudeStatus.textContent = 'Статус Claude Code ещё не проверен.';
+    ui.claudeStatus.dataset.state = 'idle';
+  } else if (claudeStatus.error || !claudeStatus.installed || !claudeStatus.authenticated) {
+    ui.claudeStatus.textContent = claudeStatus.message || 'Проверьте установку и вход в Claude Code CLI.';
+    ui.claudeStatus.dataset.state = 'error';
+  } else {
+    const version = claudeStatus.version ? ` · ${claudeStatus.version}` : '';
+    ui.claudeStatus.textContent = claudeStatus.message || `Claude Code подключён${version}.`;
+    ui.claudeStatus.dataset.state = 'ready';
+  }
+  ui.checkClaudeStatus.disabled = !isTauri || Boolean(claudeStatus.checking);
+  ui.checkClaudeStatus.textContent = claudeStatus.checking ? 'Проверяем…' : 'Проверить';
+  customSelects.refresh();
+}
+
+async function refreshClaudeStatus() {
+  if (claudeStatusRequest) return claudeStatusRequest;
+  if (!isTauri) {
+    claudeStatus = {
+      checked: false,
+      installed: false,
+      authenticated: false,
+      version: '',
+      message: 'Claude Code CLI доступен в настольном приложении.',
+    };
+    renderClaudeStatus();
+    return claudeStatus;
+  }
+
+  claudeStatus = { ...claudeStatus, checking: true, error: false };
+  renderClaudeStatus();
+  claudeStatusRequest = (async () => {
+    try {
+      const result = await invoke('get_claude_status');
+      claudeStatus = {
+        checked: true,
+        installed: result?.installed === true,
+        authenticated: result?.authenticated === true,
+        version: String(result?.version || ''),
+        message: String(result?.message || ''),
+        checking: false,
+        error: false,
+      };
+    } catch (error) {
+      claudeStatus = {
+        checked: true,
+        installed: false,
+        authenticated: false,
+        version: '',
+        message: `Не удалось проверить Claude Code. ${messageFrom(error)}`,
+        checking: false,
+        error: true,
+      };
+    }
+    renderClaudeStatus();
+    return claudeStatus;
+  })().finally(() => {
+    claudeStatusRequest = null;
+  });
+  return claudeStatusRequest;
+}
+
 function renderOllamaStatus() {
   const models = ollamaStatus.models;
   const addressConnected = ollamaStatus.checked && ollamaStatus.available && !ollamaStatus.checking;
@@ -1526,7 +1707,7 @@ function renderOllamaStatus() {
     || !ollamaStatus.available
     || models.length === 0;
 
-  const canStartOllama = isTauri
+  const canStartOllama = (isTauri || isBrowserOllamaDev)
     && ollamaStatus.installed
     && !ollamaStatus.available
     && isDefaultOllamaBaseUrl(codexSettings.ollamaBaseUrl);
@@ -1541,7 +1722,7 @@ function renderOllamaStatus() {
     ui.ollamaStatus.textContent = 'Проверяем Ollama…';
     ui.ollamaStatus.dataset.state = 'loading';
   } else if (!ollamaStatus.checked) {
-    ui.ollamaStatus.textContent = isTauri
+    ui.ollamaStatus.textContent = isTauri || isBrowserOllamaDev
       ? 'Подключение ещё не проверено.'
       : 'Проверка и анализ Ollama доступны в настольном приложении.';
     ui.ollamaStatus.dataset.state = 'idle';
@@ -1593,7 +1774,7 @@ function renderOllamaSetup() {
     if (ui.ollamaSetupDialog.open) ui.ollamaSetupDialog.close();
     return;
   }
-  const canOpenSetup = isTauri && isLocalOllamaBaseUrl(codexSettings.ollamaBaseUrl);
+  const canOpenSetup = (isTauri || isBrowserOllamaDev) && isLocalOllamaBaseUrl(codexSettings.ollamaBaseUrl);
   ui.openOllamaSetup.hidden = !canOpenSetup;
   if (!canOpenSetup && !ui.ollamaSetupDialog.open) return;
 
@@ -1665,6 +1846,10 @@ async function cancelOllamaSetupFromSettings() {
   ollamaInstallCancellationRequested = true;
   ui.cancelOllamaSetup.disabled = true;
   settingsOllamaInstallStatus('Останавливаем скачивание и установку…');
+  if (!isTauri && isBrowserOllamaDev) {
+    ollamaBrowserInstallController?.abort();
+    return;
+  }
   try {
     await invoke('cancel_ollama_setup');
   } catch (error) {
@@ -1675,9 +1860,13 @@ async function cancelOllamaSetupFromSettings() {
 }
 
 async function loadSettingsOllamaRecommendation() {
-  if (!isTauri || settingsOllamaMemoryChecked) return;
+  if ((!isTauri && !isBrowserOllamaDev) || settingsOllamaMemoryChecked) return;
   try {
-    const result = await invoke('get_system_memory_bytes');
+    const result = isTauri
+      ? await invoke('get_system_memory_bytes')
+      : await fetch('/__norman/ollama/memory', { cache: 'no-store' })
+        .then((response) => response.json())
+        .then((value) => value.totalMemoryBytes);
     if (Number.isFinite(result) && result > 0) {
       settingsOllamaMemoryBytes = result;
       settingsOllamaRecommendation = recommendationForMemory(result);
@@ -1694,7 +1883,7 @@ async function prepareOllamaSettings() {
 }
 
 async function installOllamaFromSettings() {
-  if (!isTauri || ollamaInstallInProgress || !isLocalOllamaBaseUrl(codexSettings.ollamaBaseUrl)) return;
+  if ((!isTauri && !isBrowserOllamaDev) || ollamaInstallInProgress || !isLocalOllamaBaseUrl(codexSettings.ollamaBaseUrl)) return;
   const selected = allModelsForRecommendation(settingsOllamaRecommendation)
     .find((model) => model.tag === ui.ollamaSetupModel.value);
   if (!selected) return;
@@ -1741,9 +1930,23 @@ async function installOllamaFromSettings() {
   }
 }
 
+async function requestBrowserOllama(path, payload = {}, signal) {
+  if (!isBrowserOllamaDev) throw new Error('Проверка Ollama доступна в настольном приложении.');
+  const response = await fetch(path, {
+    method: 'POST',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  return result;
+}
+
 async function refreshOllamaStatus() {
   const requestId = ++ollamaStatusRequestId;
-  if (!isTauri) {
+  if (!isTauri && !isBrowserOllamaDev) {
     ollamaStatus = {
       checked: false,
       installed: false,
@@ -1758,9 +1961,9 @@ async function refreshOllamaStatus() {
   ollamaStatus = { ...ollamaStatus, checking: true, error: false };
   renderOllamaStatus();
   try {
-    const result = await invoke('get_ollama_status', {
-      baseUrl: codexSettings.ollamaBaseUrl.trim() || null,
-    });
+    const result = isTauri
+      ? await invoke('get_ollama_status', { baseUrl: codexSettings.ollamaBaseUrl.trim() || null })
+      : await requestBrowserOllama('/__norman/ollama/status', { baseUrl: codexSettings.ollamaBaseUrl.trim() || null });
     if (requestId !== ollamaStatusRequestId) return ollamaStatus;
     const models = Array.isArray(result?.models)
       ? result.models.filter((model) => typeof model === 'string' && model.trim()).map((model) => model.trim())
@@ -1797,12 +2000,13 @@ async function refreshOllamaStatus() {
 }
 
 async function startOllamaFromSettings() {
-  if (!isTauri || ollamaStarting || !isDefaultOllamaBaseUrl(codexSettings.ollamaBaseUrl)) return;
+  if ((!isTauri && !isBrowserOllamaDev) || ollamaStarting || !isDefaultOllamaBaseUrl(codexSettings.ollamaBaseUrl)) return;
   ollamaStarting = true;
   ollamaStatus = { ...ollamaStatus, checking: true, error: false };
   renderOllamaStatus();
   try {
-    await invoke('start_ollama');
+    if (isTauri) await invoke('start_ollama');
+    else await requestBrowserOllama('/__norman/ollama/start', { baseUrl: codexSettings.ollamaBaseUrl });
     const startupDeadline = Date.now() + 15_000;
     while (Date.now() < startupDeadline) {
       const status = await refreshOllamaStatus();
@@ -1886,6 +2090,7 @@ function refreshSelectedAiProviderStatus() {
   if (codexSettings.provider === 'ollama') return refreshOllamaStatus();
   if (codexSettings.provider === 'cloudru') return refreshCloudRuStatus();
   if (codexSettings.provider === 'yandex') return refreshYandexStatus();
+  if (codexSettings.provider === 'claude') return refreshClaudeStatus();
   return refreshCodexStatus();
 }
 
@@ -2229,6 +2434,11 @@ async function releaseAnalysisPause(tab, analysisId = tab.analysisPauseId) {
   }
 }
 
+async function cancelAiAnalysis(tab, analysisId = tab.analysisPauseId) {
+  if (!analysisId || !isTauri) return;
+  await invoke('cancel_ai_analysis', { analysisId }).catch(() => {});
+}
+
 function renderProgress() {
   renderAiReviewDialog();
   const codexBusy = state.aiAnalysis === 'checking' || state.aiAnalysis === 'running';
@@ -2447,16 +2657,268 @@ function findingVerifyStatus(key) {
 
 function openAiReview(key) {
   if (!state.findings.some((finding, index) => findingKey(finding, index) === key)) return;
+  const activeTab = tabById(state.activeId);
+  const finding = state.findings.find((item, index) => findingKey(item, index) === key);
+  const failed = Boolean(finding?.id && activeTab?.aiFailure?.findingIds?.includes(String(finding.id)));
   ui.aiReviewSingleContent.hidden = false;
   ui.aiReviewResultsList.hidden = true;
   ui.aiReviewResultsList.replaceChildren();
   ui.aiReviewReasoningDetails.open = false;
   ui.aiReviewLiveStatus.dataset.findingKey = key;
-  ui.aiReviewLiveStatus.dataset.watching = String(['active', 'queued'].includes(findingVerifyStatus(key)));
+  ui.aiReviewLiveStatus.dataset.watching = String(failed || ['active', 'queued'].includes(findingVerifyStatus(key)));
   ui.aiReviewLiveStatus.dataset.lastStage = '';
   ui.aiReviewLiveMessages.replaceChildren();
   ui.aiReviewDialog.showModal();
   renderAiReviewDialog();
+}
+
+function updateAiReviewProgress(tab, token, payload = {}) {
+  if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
+  if (payload.analysisId !== `${tab.id}:${token}`) return;
+
+  const findingId = String(payload.findingId || '');
+  const reviewNumber = Number(payload.reviewNumber);
+  const summary = String(payload.summary || '').trim();
+  if (!findingId || ![1, 2, 3].includes(reviewNumber) || !summary) return;
+  if (typeof payload.signalSupported !== 'boolean') return;
+
+  const updates = tab.aiReviewUpdates.get(findingId) || new Map();
+  updates.set(reviewNumber, {
+    reviewNumber,
+    signalSupported: payload.signalSupported,
+    summary: summary.length > 500 ? `${summary.slice(0, 497)}…` : summary,
+  });
+  tab.aiReviewUpdates.set(findingId, updates);
+  const streams = tab.aiReviewStreams.get(findingId);
+  const stream = streams?.get(reviewNumber);
+  if (stream) stream.complete = true;
+
+  if (ui.aiReviewDialog.open && ui.aiReviewLiveStatus.dataset.findingKey === findingId) {
+    renderAiReviewDialog();
+  }
+}
+
+let aiReviewStreamRenderTimer = null;
+
+function scheduleAiReviewStreamRender() {
+  if (aiReviewStreamRenderTimer !== null) return;
+  aiReviewStreamRenderTimer = window.setTimeout(() => {
+    aiReviewStreamRenderTimer = null;
+    const activeTab = tabById(state.activeId);
+    const key = ui.aiReviewLiveStatus.dataset.findingKey;
+    if (ui.aiReviewDialog.open && (activeTab?.aiReviewStreams.has(key) || activeTab?.aiReviewOutputs.has(key))) {
+      renderAiReviewDialog();
+    }
+  }, 100);
+}
+
+function updateAiReviewStream(tab, token, payload = {}) {
+  if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
+  if (payload.analysisId !== `${tab.id}:${token}`) return;
+
+  const findingId = String(payload.findingId || '');
+  const reviewNumber = Number(payload.reviewNumber);
+  if (!findingId || ![1, 2, 3].includes(reviewNumber)) return;
+  const delta = typeof payload.text === 'string' ? payload.text : '';
+  if (!delta && payload.reset !== true) return;
+
+  if (payload.channel === 'answer') {
+    const outputs = tab.aiReviewOutputs.get(findingId) || new Map();
+    const previous = outputs.get(reviewNumber) || { text: '', pendingText: '' };
+    let text = payload.reset === true ? '' : `${previous.text}${delta}`;
+    if (text.length > 64_000) text = text.slice(-48_000);
+    let pendingText = payload.reset === true ? '' : `${previous.pendingText || ''}${delta}`;
+    if (pendingText.length > 64_000) pendingText = text;
+    outputs.set(reviewNumber, { text, pendingText });
+    tab.aiReviewOutputs.set(findingId, outputs);
+    if (ui.aiReviewDialog.open && ui.aiReviewLiveStatus.dataset.findingKey === findingId) {
+      scheduleAiReviewStreamRender();
+    }
+    return;
+  }
+  if (payload.channel !== 'thinking') return;
+
+  const streams = tab.aiReviewStreams.get(findingId) || new Map();
+  const previous = streams.get(reviewNumber) || { text: '', pendingText: '', complete: false, reset: true };
+  let text = payload.reset === true ? '' : `${previous.text}${delta}`;
+  if (text.length > 64_000) {
+    const trimTo = text.length - 48_000;
+    const nextLine = text.indexOf('\n', trimTo);
+    text = text.slice(nextLine >= 0 ? nextLine + 1 : trimTo);
+  }
+  let pendingText = payload.reset === true ? '' : `${previous.pendingText || ''}${delta}`;
+  let reset = payload.reset === true || previous.reset === true;
+  if (pendingText.length > 64_000) {
+    pendingText = text;
+    reset = true;
+  }
+  streams.set(reviewNumber, {
+    text,
+    pendingText,
+    reset,
+    complete: false,
+  });
+  tab.aiReviewStreams.set(findingId, streams);
+
+  if (ui.aiReviewDialog.open && ui.aiReviewLiveStatus.dataset.findingKey === findingId) {
+    scheduleAiReviewStreamRender();
+  }
+}
+
+function appendAiReviewMarkdownInline(target, text) {
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\*[^*]+\*|_[^_]+_)/g;
+  let cursor = 0;
+  for (const match of text.matchAll(pattern)) {
+    const index = match.index ?? 0;
+    if (index > cursor) {
+      target.append(document.createTextNode(text.slice(cursor, index)));
+    }
+    const token = match[0];
+    const delimiter = token.startsWith('**') || token.startsWith('__')
+      ? 2
+      : token.startsWith('~~') || token.startsWith('`') ? 1 : 1;
+    const content = token.slice(delimiter, -delimiter);
+    const element = token.startsWith('`')
+      ? document.createElement('code')
+      : token.startsWith('~~')
+        ? document.createElement('del')
+        : delimiter === 2
+          ? document.createElement('strong')
+          : document.createElement('em');
+    element.textContent = content;
+    target.append(element);
+    cursor = index + token.length;
+  }
+  if (cursor < text.length) {
+    target.append(document.createTextNode(text.slice(cursor)));
+  }
+}
+
+function appendAiReviewMarkdownLine(thought, line) {
+  const trimmed = line.trim();
+  if (thought.dataset.inCodeFence === 'true') {
+    if (/^```/.test(trimmed)) {
+      thought.dataset.inCodeFence = 'false';
+      thought.dataset.lastBlock = '';
+      return;
+    }
+    let pre = thought.lastElementChild;
+    if (!pre?.classList.contains('ai-review-markdown-code')) {
+      pre = document.createElement('pre');
+      pre.className = 'ai-review-markdown-code';
+      const code = document.createElement('code');
+      pre.append(code);
+      thought.append(pre);
+    }
+    pre.querySelector('code').append(document.createTextNode(`${line}\n`));
+    return;
+  }
+
+  if (/^```/.test(trimmed)) {
+    thought.dataset.inCodeFence = 'true';
+    thought.dataset.lastBlock = 'code';
+    return;
+  }
+  if (!trimmed) {
+    thought.dataset.lastBlock = '';
+    return;
+  }
+
+  const heading = trimmed.match(/^(#{1,3})\s+(.+)$/);
+  if (heading) {
+    const element = document.createElement(`h${heading[1].length + 1}`);
+    element.className = 'ai-review-markdown-heading ai-review-markdown-enter';
+    appendAiReviewMarkdownInline(element, heading[2]);
+    thought.append(element);
+    thought.dataset.lastBlock = 'heading';
+    return;
+  }
+
+  const unordered = trimmed.match(/^[-*+]\s+(.+)$/);
+  const ordered = trimmed.match(/^\d+[.)]\s+(.+)$/);
+  if (unordered || ordered) {
+    const tagName = unordered ? 'ul' : 'ol';
+    let list = thought.dataset.lastBlock === tagName ? thought.lastElementChild : null;
+    if (!list || list.tagName.toLowerCase() !== tagName) {
+      list = document.createElement(tagName);
+      list.className = 'ai-review-markdown-list';
+      thought.append(list);
+    }
+    const item = document.createElement('li');
+    item.className = 'ai-review-markdown-enter';
+    appendAiReviewMarkdownInline(item, (unordered || ordered)[1]);
+    list.append(item);
+    thought.dataset.lastBlock = tagName;
+    return;
+  }
+
+  const quote = trimmed.match(/^>\s?(.*)$/);
+  if (quote) {
+    let blockquote = thought.dataset.lastBlock === 'blockquote' ? thought.lastElementChild : null;
+    if (!blockquote || blockquote.tagName !== 'BLOCKQUOTE') {
+      blockquote = document.createElement('blockquote');
+      blockquote.className = 'ai-review-markdown-quote';
+      thought.append(blockquote);
+    }
+    const paragraph = document.createElement('p');
+    paragraph.className = 'ai-review-markdown-enter';
+    appendAiReviewMarkdownInline(paragraph, quote[1]);
+    blockquote.append(paragraph);
+    thought.dataset.lastBlock = 'blockquote';
+    return;
+  }
+
+  const paragraph = document.createElement('p');
+  paragraph.className = 'ai-review-markdown-paragraph ai-review-markdown-enter';
+  appendAiReviewMarkdownInline(paragraph, line);
+  thought.append(paragraph);
+  thought.dataset.lastBlock = 'paragraph';
+}
+
+function trimAiReviewMarkdownHistory(thought) {
+  while (thought.textContent.length > 48_000) {
+    const first = thought.firstElementChild;
+    if (!first) break;
+    if (['UL', 'OL', 'BLOCKQUOTE'].includes(first.tagName) && first.firstElementChild) {
+      first.firstElementChild.remove();
+      if (!first.firstElementChild) first.remove();
+      continue;
+    }
+    if (first === thought.lastElementChild) break;
+    first.remove();
+  }
+}
+
+function updateAiReviewMarkdownStream(thought, added, complete) {
+  const finalizePendingLine = () => {
+    const line = thought.dataset.pendingLine || '';
+    thought.lastElementChild?.classList.contains('ai-review-markdown-pending')
+      && thought.lastElementChild.remove();
+    thought.dataset.pendingLine = '';
+    appendAiReviewMarkdownLine(thought, line);
+  };
+
+  const segments = added.split('\n');
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    if (segment) {
+      let pending = thought.lastElementChild;
+      if (!pending?.classList.contains('ai-review-markdown-pending')) {
+        pending = document.createElement('p');
+        pending.className = 'ai-review-markdown-pending';
+        pending.append(document.createTextNode(''));
+        thought.append(pending);
+      }
+      let pendingLine = `${thought.dataset.pendingLine || ''}${segment}`;
+      if (pendingLine.length > 48_000) pendingLine = `…${pendingLine.slice(-47_999)}`;
+      thought.dataset.pendingLine = pendingLine;
+      pending.firstChild.nodeValue = thought.dataset.pendingLine;
+    }
+    if (index < segments.length - 1) finalizePendingLine();
+  }
+  if (complete && thought.dataset.pendingLine) finalizePendingLine();
+  trimAiReviewMarkdownHistory(thought);
+  if (thought.dataset.followLatest !== 'false') thought.scrollTop = thought.scrollHeight;
 }
 
 function renderAiReviewDialog() {
@@ -2466,18 +2928,27 @@ function renderAiReviewDialog() {
   const index = state.findings.findIndex((finding, itemIndex) => findingKey(finding, itemIndex) === key);
   if (index < 0) return;
   const finding = state.findings[index];
+  const activeTab = tabById(state.activeId);
+  const failure = activeTab?.aiFailure;
+  const failed = Boolean(finding.id && failure?.findingIds?.includes(String(finding.id)));
+  const reviewUpdates = [...(activeTab?.aiReviewUpdates?.get(key)?.values() || [])]
+    .sort((left, right) => left.reviewNumber - right.reviewNumber);
+  const reviewStreams = activeTab?.aiReviewStreams?.get(key) || new Map();
+  const reviewOutputs = activeTab?.aiReviewOutputs?.get(key) || new Map();
   const verifyStatus = findingVerifyStatus(key);
   const isChecking = verifyStatus === 'active' || verifyStatus === 'queued';
   const watching = ui.aiReviewLiveStatus.dataset.watching === 'true';
   const providerLabel = aiProviderLabel(finding.aiProvider || codexSettings.provider);
   const confidence = aiConfidenceLevel(finding.aiConfidence);
   const hasResult = finding.aiConfidence != null || Boolean(finding.aiRationale || finding.aiRejectionReason);
-  ui.aiReviewTitle.textContent = `${isChecking ? 'Проверка' : 'Оценка'} · ${providerLabel}`;
+  ui.aiReviewTitle.textContent = `${failed ? 'Сбой проверки' : isChecking ? 'Проверка' : 'Оценка'} · ${providerLabel}`;
   ui.aiReviewExcerpt.textContent = finding.excerpt || 'Фрагмент не сохранён.';
   const ruleExplanation = String(finding.reason || '').trim();
   ui.aiReviewRuleExplanation.textContent = ruleExplanation;
   ui.aiReviewRuleSection.hidden = !ruleExplanation;
   ui.aiReviewResultSection.hidden = !hasResult;
+  ui.aiReviewConfidenceMarker.textContent = findingConfidenceMarker(confidence);
+  ui.aiReviewResultSection.querySelector('.ai-review-result').dataset.confidence = confidence;
   ui.aiReviewConfidence.textContent = hasResult ? aiReviewConfidenceLabel(finding.aiConfidence) : 'Проверяется';
   ui.aiReviewDecision.textContent = !hasResult
     ? 'Ожидайте завершения проверки сигнала.'
@@ -2489,7 +2960,6 @@ function renderAiReviewDialog() {
     || 'Краткое обоснование не сохранено.';
   ui.aiReviewReasoningDetails.hidden = !hasResult;
 
-  const activeTab = tabById(state.activeId);
   const pauseRequested = activeTab?.pauseState === 'pause-requested';
   const paused = activeTab?.pauseState === 'paused';
   let message = '';
@@ -2504,14 +2974,16 @@ function renderAiReviewDialog() {
     stage = 'paused';
     message = 'Анализ приостановлен и продолжится после возобновления.';
   } else if (verifyStatus === 'active') {
-    stage = 'active';
-    message = 'Модель проверяет сигнал по контексту документа.';
-  } else if (watching && hasResult) {
+    stage = '';
+  } else if (watching && hasResult && reviewUpdates.length === 0) {
     stage = 'complete';
     message = 'Проверка завершена. Результат показан ниже.';
   } else if (watching && state.aiAnalysis === 'running') {
     stage = 'waiting';
     message = 'Ожидаю результат проверки сигнала.';
+  } else if (failed) {
+    stage = 'error';
+    message = `Проверка сигнала прервана: ${failure.message}`;
   } else if (watching && ['error', 'unavailable'].includes(state.aiAnalysis)) {
     stage = 'error';
     message = 'Проверка прервана до получения результата. Локальный сигнал сохранён.';
@@ -2523,8 +2995,109 @@ function renderAiReviewDialog() {
     ui.aiReviewLiveMessages.append(entry);
     ui.aiReviewLiveStatus.dataset.lastStage = stage;
   }
-  ui.aiReviewLiveStatus.hidden = !isChecking && !(watching && (hasResult || stage));
+  const reviewNumbers = [...new Set([
+    ...reviewUpdates.map((update) => update.reviewNumber),
+    ...reviewStreams.keys(),
+    ...reviewOutputs.keys(),
+  ])].sort((left, right) => left - right);
+  for (const reviewNumber of reviewNumbers) {
+    const update = reviewUpdates.find((item) => item.reviewNumber === reviewNumber);
+    const stream = reviewStreams.get(reviewNumber);
+    const selector = `[data-review-number="${reviewNumber}"]`;
+    let entry = ui.aiReviewLiveMessages.querySelector(selector);
+    if (!entry) {
+      entry = document.createElement('li');
+      entry.className = 'ai-review-chat-message ai-review-chat-review';
+      entry.dataset.reviewNumber = String(reviewNumber);
+      const details = document.createElement('details');
+      details.className = 'ai-review-chat-details';
+      details.open = false;
+      const detailsLabel = document.createElement('summary');
+      detailsLabel.textContent = 'Рассуждение ИИ';
+      const thought = document.createElement('div');
+      thought.className = 'ai-review-chat-review-stream';
+      thought.dataset.followLatest = 'true';
+      thought.addEventListener('scroll', () => {
+        const distanceToBottom = thought.scrollHeight - thought.clientHeight - thought.scrollTop;
+        thought.dataset.followLatest = String(distanceToBottom <= 18);
+      });
+      details.addEventListener('toggle', () => {
+        if (details.open && thought.dataset.followLatest !== 'false') {
+          requestAnimationFrame(() => {
+            if (details.open && thought.dataset.followLatest !== 'false') {
+              thought.scrollTop = thought.scrollHeight;
+            }
+          });
+        }
+      });
+      const summary = document.createElement('p');
+      summary.className = 'ai-review-chat-review-summary';
+      details.append(detailsLabel, thought, summary);
+      entry.append(details);
+      ui.aiReviewLiveMessages.append(entry);
+    }
+    const details = entry.querySelector('.ai-review-chat-details');
+    const detailsLabel = details.querySelector('summary');
+    const thought = entry.querySelector('.ai-review-chat-review-stream');
+    const summary = entry.querySelector('.ai-review-chat-review-summary');
+    const complete = Boolean(stream?.complete || update);
+    detailsLabel.textContent = complete ? 'Показать ход рассуждения' : 'Модель рассуждает';
+    const nextThought = stream?.text || (complete ? '' : 'Ожидаю текст рассуждения…');
+    if (stream && (stream.reset || thought.dataset.initialized !== 'true')) {
+      const shouldFollowLatest = thought.dataset.followLatest !== 'false';
+      thought.replaceChildren();
+      thought.dataset.pendingLine = '';
+      thought.dataset.inCodeFence = 'false';
+      thought.dataset.lastBlock = '';
+      thought.dataset.followLatest = String(shouldFollowLatest);
+      updateAiReviewMarkdownStream(thought, stream.text, complete);
+      thought.dataset.initialized = 'true';
+      stream.pendingText = '';
+      stream.reset = false;
+    } else if (stream?.pendingText) {
+      const added = stream.pendingText;
+      stream.pendingText = '';
+      updateAiReviewMarkdownStream(thought, added, complete);
+    } else if (complete) {
+      updateAiReviewMarkdownStream(thought, '', true);
+    } else if (!stream && thought.dataset.initialized !== 'true' && nextThought) {
+      thought.replaceChildren(document.createTextNode(nextThought));
+      thought.dataset.initialized = 'true';
+    }
+    thought.classList.toggle('is-streaming', !complete && Boolean(stream?.text));
+    thought.hidden = !stream?.text;
+    summary.textContent = update?.summary || '';
+    summary.hidden = !update?.summary;
+
+    let answer = entry.querySelector('.ai-review-chat-answer');
+    if (!answer) {
+      answer = document.createElement('div');
+      answer.className = 'ai-review-chat-answer';
+      const answerLabel = document.createElement('strong');
+      answerLabel.className = 'ai-review-chat-answer-label';
+      const answerText = document.createElement('pre');
+      answerText.className = 'ai-review-chat-answer-text';
+      answer.append(answerLabel, answerText);
+      entry.append(answer);
+    }
+    const output = reviewOutputs.get(reviewNumber);
+    const answerText = answer.querySelector('.ai-review-chat-answer-text');
+    answer.querySelector('.ai-review-chat-answer-label').textContent = failed
+      ? 'Ответ, полученный до сбоя'
+      : 'Ответ модели';
+    answerText.textContent = output?.text
+      || (failed ? 'Модель не успела передать структурированный ответ. Сохранён доступный ход рассуждений.' : '');
+    answer.hidden = !output?.text && !failed;
+    if (output?.pendingText) output.pendingText = '';
+  }
+  ui.aiReviewLiveStatus.hidden = !isChecking && !(watching && (hasResult || stage || failed));
   ui.aiReviewLiveTyping.hidden = verifyStatus !== 'active' || paused;
+  const typingLabel = ui.aiReviewLiveTyping.querySelector('.ai-review-typing-label');
+  if (reviewUpdates.length === 0) {
+    typingLabel.textContent = 'Модель готовит первую оценку';
+  } else {
+    typingLabel.textContent = 'Модель завершает оценку';
+  }
 }
 
 function openAiReviewResults() {
@@ -2583,6 +3156,7 @@ function openAiReviewResults() {
 function aiProviderLabel(provider) {
   switch (String(provider || '').toLocaleLowerCase()) {
     case 'ollama': return 'Ollama';
+    case 'claude': return 'Claude Code';
     case 'cloudru': return 'Cloud.ru';
     case 'yandex': return 'Yandex AI Studio';
     default: return 'ChatGPT (Codex)';
@@ -2596,6 +3170,7 @@ function findingAriaLabel(finding, data, verifyStatus) {
     `Уровень ${findingConfidenceMarker(data.confidence)}`,
     data.aiFinding ? `Уверенность ${data.aiProvider} ${aiConfidenceLabel(finding.aiConfidence)}` : 'Возможно нарушение',
     verifyStatus === 'active' ? 'Проверяется' : verifyStatus === 'queued' ? 'В очереди' : '',
+    verifyStatus === 'error' ? 'Проверка ИИ прервана, сигнал отмечен как сбойный' : '',
   ].filter(Boolean).join('. ');
 }
 
@@ -2659,7 +3234,8 @@ function syncFindingRow(item, finding, verifyStatus) {
 function syncFindingReviewControl(item, key, finding, data, verifyStatus) {
   const meta = item.querySelector('.finding-meta');
   let control = meta.querySelector('.finding-origin');
-  const show = data.aiFinding || verifyStatus === 'active';
+  const failed = verifyStatus === 'error';
+  const show = data.aiFinding || verifyStatus === 'active' || failed;
   if (!show) {
     control?.remove();
     return;
@@ -2673,13 +3249,17 @@ function syncFindingReviewControl(item, key, finding, data, verifyStatus) {
     meta.append(control);
   }
   const providerLabel = aiProviderLabel(data.aiProvider || codexSettings.provider);
-  control.textContent = data.aiFinding
+  control.textContent = failed ? 'Ошибка' : data.aiFinding
     ? providerLabel === 'ChatGPT (Codex)' ? 'Codex' : providerLabel
     : 'Проверяется';
-  control.title = data.aiFinding
+  control.title = failed
+    ? 'Показать сохранённый ответ модели и ход рассуждений до сбоя'
+    : data.aiFinding
     ? 'Показать входные данные и результат проверки'
     : 'Показать ход проверки сигнала';
-  control.setAttribute('aria-label', data.aiFinding
+  control.setAttribute('aria-label', failed
+    ? `Показать ответ модели и ход рассуждений до сбоя на сигнале «${data.fullTitle}»`
+    : data.aiFinding
     ? `Показать данные проверки ${providerLabel}`
     : 'Показать ход проверки сигнала');
 }
@@ -2775,6 +3355,13 @@ function ensureRejectedFindingsSection() {
 }
 
 function findingVerificationStatuses(entries) {
+  const failedIds = new Set((state.aiFailure?.findingIds || []).map(String));
+  if (state.aiAnalysis === 'error' && failedIds.size) {
+    return new Map(entries
+      .filter(({ finding }) => failedIds.has(String(finding.id || '')))
+      .map(({ key }) => [key, 'error']));
+  }
+
   const progress = state.aiProgress || {};
   const verifying = (state.aiAnalysis === 'checking' || state.aiAnalysis === 'running')
     && progress.phase === 'verify';
@@ -2910,8 +3497,8 @@ function updateAiFinding(tab, token, finding, provider) {
   reflectAnalysisTab(tab);
 }
 
-async function analyzeCodexInBrowser(input, onProgress, onFinding, onPauseState) {
-  const response = await fetch('/__norman/codex/analyze', {
+async function analyzeAiInBrowser(path, providerLabel, input, onProgress, onFinding, onPauseState, onReviewStream, signal) {
+  const response = await fetch(path, {
     method: 'POST',
     cache: 'no-store',
     headers: {
@@ -2919,6 +3506,7 @@ async function analyzeCodexInBrowser(input, onProgress, onFinding, onPauseState)
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(input),
+    signal,
   });
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
@@ -2932,13 +3520,19 @@ async function analyzeCodexInBrowser(input, onProgress, onFinding, onPauseState)
     try {
       event = JSON.parse(line);
     } catch {
-      throw new Error('Ответ адаптера Codex имеет неверный формат.');
+      throw new Error(`Ответ адаптера ${providerLabel} имеет неверный формат.`);
     }
     if (event.type === 'progress') onProgress(event.payload || {});
     else if (event.type === 'finding') onFinding(event.payload?.finding);
     else if (event.type === 'pause') onPauseState(Boolean(event.payload?.paused));
+    else if (event.type === 'review-stream') onReviewStream(event.payload || {});
+    else if (event.type === 'review-update') onReviewStream({ ...event.payload, complete: true });
     else if (event.type === 'complete') complete = event.payload || {};
-    else if (event.type === 'error') throw new Error(event.payload?.message || 'Проверка Codex не завершилась.');
+    else if (event.type === 'error') {
+      const error = new Error(event.payload?.message || `Проверка ${providerLabel} не завершилась.`);
+      if (typeof event.payload?.findingId === 'string') error.findingId = event.payload.findingId;
+      throw error;
+    }
   };
 
   if (response.body?.getReader) {
@@ -2960,12 +3554,19 @@ async function analyzeCodexInBrowser(input, onProgress, onFinding, onPauseState)
   }
 
   if (!complete || !Array.isArray(complete.findings)) {
-    throw new Error('Адаптер Codex завершил поток без итогового списка сигналов.');
+    throw new Error(`Адаптер ${providerLabel} завершил поток без итогового списка сигналов.`);
   }
   return complete;
 }
 
 async function executeAiReview(tab, token, parallelProcesses) {
+  tab.aiReviewUpdates.clear();
+  tab.aiReviewStreams.clear();
+  tab.aiReviewOutputs.clear();
+  tab.aiFailure = null;
+  tab.aiReviewAbortController?.abort();
+  const requestController = new AbortController();
+  tab.aiReviewAbortController = requestController;
   tab.aiAnalysis = 'checking';
   tab.aiAnalysisMessage = '';
   tab.aiProgress = null;
@@ -2976,7 +3577,8 @@ async function executeAiReview(tab, token, parallelProcesses) {
   const status = provider === 'ollama'
     ? await refreshOllamaStatus()
     : provider === 'cloudru' ? await refreshCloudRuStatus()
-      : provider === 'yandex' ? await refreshYandexStatus() : await refreshCodexStatus();
+      : provider === 'yandex' ? await refreshYandexStatus()
+        : provider === 'claude' ? await refreshClaudeStatus() : await refreshCodexStatus();
   if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
   if (!codexSettings.enabled) {
     tab.aiAnalysis = 'idle';
@@ -2984,6 +3586,9 @@ async function executeAiReview(tab, token, parallelProcesses) {
     return;
   }
   const codexAvailable = codexPayloadIsAvailable(status);
+  const claudeAvailable = status?.checked === true
+    && status.installed === true
+    && status.authenticated === true;
   const ollamaAvailable = status?.checked === true
     && status.available === true
     && status.models.includes(codexSettings.ollamaModel);
@@ -2994,6 +3599,7 @@ async function executeAiReview(tab, token, parallelProcesses) {
     && status.available === true
     && status.models.includes(codexSettings.yandexModel);
   if ((provider === 'codex' && !codexAvailable)
+    || (provider === 'claude' && !claudeAvailable)
     || (provider === 'ollama' && !ollamaAvailable)
     || (provider === 'cloudru' && !cloudRuAvailable)
     || (provider === 'yandex' && !yandexAvailable)) {
@@ -3004,6 +3610,10 @@ async function executeAiReview(tab, token, parallelProcesses) {
         ? 'Проверьте API-ключ и модель Cloud.ru. Локальные результаты сохранены.'
         : provider === 'yandex'
           ? 'Проверьте API-ключ, ID каталога и модель Yandex AI Studio. Локальные результаты сохранены.'
+          : provider === 'claude'
+            ? !status.installed
+              ? 'Claude Code CLI не найден. Локальные результаты сохранены.'
+              : 'Войдите в Claude Code CLI. Локальные результаты сохранены.'
           : !status.installed
             ? 'Codex CLI не найден. Локальные результаты сохранены.'
             : 'Войдите в Codex CLI. Локальные результаты сохранены.');
@@ -3054,6 +3664,14 @@ async function executeAiReview(tab, token, parallelProcesses) {
             model: codexSettings.yandexModel,
             parallelProcesses,
           }
+          : provider === 'claude'
+            ? {
+              text: tab.document.text,
+              findings: tab.findings,
+              model: codexSettings.claudeModel,
+              reasoningEffort: codexSettings.claudeReasoningEffort,
+              parallelProcesses,
+            }
           : {
             text: tab.document.text,
             findings: tab.findings,
@@ -3066,16 +3684,30 @@ async function executeAiReview(tab, token, parallelProcesses) {
       try {
         unlisten.push(await listen('ai-analysis-progress', (event) => onProgress(event.payload || {})));
         unlisten.push(await listen('ai-finding', (event) => onFinding(event.payload?.finding)));
+        unlisten.push(await listen('ai-review-update', (event) => updateAiReviewProgress(tab, token, event.payload || {})));
+        unlisten.push(await listen('ai-review-stream', (event) => updateAiReviewStream(tab, token, event.payload || {})));
       } catch {
         // Final invoke result still supplies all findings if event listening is unavailable.
       }
       const command = provider === 'ollama' ? 'analyze_with_ollama'
         : provider === 'cloudru' ? 'analyze_with_cloudru'
-          : provider === 'yandex' ? 'analyze_with_yandex' : 'analyze_with_codex';
+          : provider === 'yandex' ? 'analyze_with_yandex'
+            : provider === 'claude' ? 'analyze_with_claude' : 'analyze_with_codex';
       result = await invoke(command, input);
     } else {
-      if (provider !== 'codex') throw new Error(`Проверка ${providerLabel} доступна только в настольном приложении.`);
-      result = await analyzeCodexInBrowser(input, onProgress, onFinding, onPauseState);
+      if (provider === 'codex') {
+        result = await analyzeAiInBrowser('/__norman/codex/analyze', 'Codex', input, onProgress, onFinding, onPauseState, (payload) => {
+          if (payload.complete) updateAiReviewProgress(tab, token, payload);
+          else updateAiReviewStream(tab, token, payload);
+        }, requestController.signal);
+      } else if (provider === 'ollama' && isBrowserOllamaDev) {
+        result = await analyzeAiInBrowser('/__norman/ollama/analyze', 'Ollama', input, onProgress, onFinding, onPauseState, (payload) => {
+          if (payload.complete) updateAiReviewProgress(tab, token, payload);
+          else updateAiReviewStream(tab, token, payload);
+        }, requestController.signal);
+      } else {
+        throw new Error(`Проверка ${providerLabel} доступна только в настольном приложении.`);
+      }
     }
     if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
     const resultFindings = Array.isArray(result) ? result : result?.findings;
@@ -3088,7 +3720,26 @@ async function executeAiReview(tab, token, parallelProcesses) {
     if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
     tab.aiAnalysis = 'error';
     tab.aiAnalysisMessage = formatAiReviewError(error);
+    const activeFindingIds = tab.aiProgress?.phase === 'verify'
+      ? (tab.aiProgress.activeFindingIds || []).map(String)
+      : [];
+    const failedFindingIds = [...new Set([
+      ...(typeof error.findingId === 'string' ? [error.findingId] : []),
+      ...(!error.findingId ? activeFindingIds : []),
+    ])];
+    if (failedFindingIds.length) {
+      const failedFinding = tab.findings.find((finding) => failedFindingIds.includes(String(finding.id || '')));
+      tab.aiFailure = {
+        findingIds: failedFindingIds,
+        provider,
+        message: messageFrom(error),
+      };
+      if (failedFinding) {
+        tab.aiAnalysisMessage += ` Сбой на сигнале «${failedFinding.title || failedFinding.factor || failedFinding.excerpt || 'Без названия'}».`;
+      }
+    }
   } finally {
+    if (tab.aiReviewAbortController === requestController) tab.aiReviewAbortController = null;
     for (const stop of unlisten) stop();
   }
 }
@@ -3219,6 +3870,7 @@ function reflectAnalysisTab(tab) {
   state.progress = tab.progress;
   state.aiAnalysis = tab.aiAnalysis || 'idle';
   state.aiAnalysisMessage = tab.aiAnalysisMessage || '';
+  state.aiFailure = tab.aiFailure || null;
   state.aiProgress = tab.aiProgress || null;
   render();
 }
@@ -3540,6 +4192,7 @@ ui.aiReviewDialog.addEventListener('click', (event) => {
   if (event.target === ui.aiReviewDialog) ui.aiReviewDialog.close();
 });
 ui.checkCodexStatus.addEventListener('click', () => void refreshCodexStatus());
+ui.checkClaudeStatus.addEventListener('click', () => void refreshClaudeStatus());
 ui.checkOllamaStatus.addEventListener('click', () => void refreshOllamaStatus());
 ui.ollamaBaseUrl.addEventListener('input', () => {
   ollamaStatusRequestId += 1;
@@ -3592,7 +4245,7 @@ ui.settingsDialog.addEventListener('change', (event) => {
     render();
   }
   if (event.target === ui.codexProvider) {
-    codexSettings.provider = ['ollama', 'cloudru', 'yandex'].includes(ui.codexProvider.value) ? ui.codexProvider.value : 'codex';
+    codexSettings.provider = ['claude', 'ollama', 'cloudru', 'yandex'].includes(ui.codexProvider.value) ? ui.codexProvider.value : 'codex';
     saveCodexSettings();
     syncCodexSettingsUI();
     if (codexSettings.provider === 'ollama') void prepareOllamaSettings();
@@ -3619,6 +4272,11 @@ ui.settingsDialog.addEventListener('change', (event) => {
   }
   if (event.target === ui.yandexModel) codexSettings.yandexModel = ui.yandexModel.value;
   if (event.target === ui.codexModel) codexSettings.model = ui.codexModel.value;
+  if (event.target === ui.claudeModel) codexSettings.claudeModel = ui.claudeModel.value;
+  if (event.target === ui.claudeReasoning) {
+    codexSettings.claudeReasoningEffort = ui.claudeReasoning.value;
+    renderHeaderAiStatus();
+  }
   if (event.target === ui.codexReasoning) {
     codexSettings.reasoningEffort = ui.codexReasoning.value;
     renderHeaderAiStatus();
@@ -3627,7 +4285,7 @@ ui.settingsDialog.addEventListener('change', (event) => {
     const selected = Number(ui.parallelProcesses.value);
     codexSettings.parallelProcesses = [1, 2, 3, 4].includes(selected) ? selected : 1;
   }
-  if ([ui.codexEnabled, ui.codexProvider, ui.ollamaBaseUrl, ui.ollamaModel, ui.cloudRuModel, ui.yandexModel, ui.codexModel, ui.codexReasoning, ui.parallelProcesses].includes(event.target)) {
+  if ([ui.codexEnabled, ui.codexProvider, ui.ollamaBaseUrl, ui.ollamaModel, ui.cloudRuModel, ui.yandexModel, ui.codexModel, ui.codexReasoning, ui.claudeModel, ui.claudeReasoning, ui.parallelProcesses].includes(event.target)) {
     saveCodexSettings();
   }
   if (event.target === ui.codexEnabled && codexSettings.enabled) {
