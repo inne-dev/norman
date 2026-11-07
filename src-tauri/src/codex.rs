@@ -2,13 +2,13 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     ffi::OsString,
-    fs,
+    fs::{self, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -38,6 +38,9 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_SOURCE_EXCERPT_BYTES: usize = 4 * 1024;
 const MAX_RATIONALE_BYTES: usize = 1024;
 const MAX_REJECTION_REASON_CHARS: usize = 120;
+const TEMP_OLLAMA_DIAG_FILENAME: &str = "norman-ollama-diagnostics.log";
+const TEMP_OLLAMA_DIAG_MAX_BYTES: u64 = 16 * 1024;
+static TEMP_OLLAMA_DIAG_LOCK: Mutex<()> = Mutex::new(());
 const PER_RUN_TIMEOUT: Duration = Duration::from_secs(75);
 const TOTAL_RUN_TIMEOUT: Duration = Duration::from_secs(8 * 60);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1435,6 +1438,39 @@ struct OllamaMessage {
     content: String,
 }
 
+// [TEMP-OLLAMA-DIAG] Remove after collecting one failing run.
+fn log_ollama_request_failure(schema_path: &str, duration: Duration, error: &reqwest::Error) {
+    let phase = match schema_path {
+        "verify-schema.json" => "verify",
+        "discover-schema.json" => "discover",
+        _ => return,
+    };
+    let error_type = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else {
+        "request"
+    };
+    let record = format!(
+        "[TEMP-OLLAMA-DIAG] phase={phase} duration_ms={} error={error_type}\n",
+        duration.as_millis()
+    );
+    let Ok(_guard) = TEMP_OLLAMA_DIAG_LOCK.lock() else {
+        return;
+    };
+    let path = env::temp_dir().join(TEMP_OLLAMA_DIAG_FILENAME);
+    let current_size = fs::metadata(&path).map(|metadata| metadata.len()).unwrap_or(0);
+    if current_size.saturating_add(record.len() as u64) > TEMP_OLLAMA_DIAG_MAX_BYTES
+        && fs::write(&path, b"").is_err()
+    {
+        return;
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(record.as_bytes());
+    }
+}
+
 fn run_ollama_structured_prompt<T: for<'de> Deserialize<'de>>(
     prompt: &str,
     schema_path: &str,
@@ -1453,6 +1489,7 @@ fn run_ollama_structured_prompt<T: for<'de> Deserialize<'de>>(
         .map_err(|_| "Не удалось прочитать JSON-схему для Ollama.".to_string())?;
     let endpoint = ollama_endpoint(base_url, "/api/chat");
     // Every analysis issues fresh HTTP calls. Responses are never persisted or cached.
+    let request_started = Instant::now();
     let response = client
         .post(endpoint)
         .timeout(timeout)
@@ -1464,7 +1501,10 @@ fn run_ollama_structured_prompt<T: for<'de> Deserialize<'de>>(
             "options": {"temperature": 0, "seed": 42}
         }))
         .send()
-        .map_err(|_| "Не удалось получить ответ от Ollama. Проверьте подключение и лимит времени.".to_string())?;
+        .map_err(|error| {
+            log_ollama_request_failure(schema_path, request_started.elapsed(), &error);
+            "Не удалось получить ответ от Ollama. Проверьте подключение и лимит времени.".to_string()
+        })?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("Ollama API вернул HTTP {}.", status.as_u16()));
