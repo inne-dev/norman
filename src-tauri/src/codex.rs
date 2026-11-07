@@ -82,6 +82,7 @@ pub(super) struct CodexStatus {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct OllamaStatus {
+    installed: bool,
     available: bool,
     models: Vec<String>,
     message: String,
@@ -279,6 +280,7 @@ pub(super) async fn get_ollama_status(base_url: Option<String>) -> OllamaStatus 
     tokio::task::spawn_blocking(move || detect_ollama_status(base_url.as_deref()))
         .await
         .unwrap_or_else(|_| OllamaStatus {
+            installed: super::ollama_setup::is_ollama_installed(),
             available: false,
             models: Vec::new(),
             message: "Не удалось проверить подключение к Ollama.".into(),
@@ -321,12 +323,16 @@ pub(super) async fn pull_ollama_model(
     match tokio::task::spawn_blocking(move || pull_ollama_model_inner(&app, &model)).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => {
-            emit_ollama_pull_progress(&failure_app, "error", None, None, Some(error.clone()));
+            if !super::ollama_setup::is_ollama_setup_cancelled() {
+                emit_ollama_pull_progress(&failure_app, "error", None, None, Some(error.clone()));
+            }
             Err(error)
         }
         Err(_) => {
             let error = "Загрузка модели Ollama была прервана.".to_string();
-            emit_ollama_pull_progress(&failure_app, "error", None, None, Some(error.clone()));
+            if !super::ollama_setup::is_ollama_setup_cancelled() {
+                emit_ollama_pull_progress(&failure_app, "error", None, None, Some(error.clone()));
+            }
             Err(error)
         }
     }
@@ -1443,10 +1449,12 @@ fn run_ollama_structured_prompt<T: for<'de> Deserialize<'de>>(
 }
 
 fn detect_ollama_status(base_url: Option<&str>) -> OllamaStatus {
+    let installed = super::ollama_setup::is_ollama_installed();
     let base_url = match normalize_ollama_base_url(base_url) {
         Ok(url) => url,
         Err(message) => {
             return OllamaStatus {
+                installed,
                 available: false,
                 models: Vec::new(),
                 message,
@@ -1457,6 +1465,7 @@ fn detect_ollama_status(base_url: Option<&str>) -> OllamaStatus {
         Ok(client) => client,
         Err(message) => {
             return OllamaStatus {
+                installed,
                 available: false,
                 models: Vec::new(),
                 message,
@@ -1464,6 +1473,7 @@ fn detect_ollama_status(base_url: Option<&str>) -> OllamaStatus {
         }
     };
     query_ollama_status(&base_url, &client).unwrap_or_else(|message| OllamaStatus {
+        installed,
         available: false,
         models: Vec::new(),
         message,
@@ -1481,6 +1491,7 @@ fn query_ollama_status(
         "Ollama доступна.".into()
     };
     Ok(OllamaStatus {
+        installed: super::ollama_setup::is_ollama_installed(),
         available: true,
         models,
         message,
@@ -1569,6 +1580,7 @@ fn build_ollama_pull_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .connect_timeout(STATUS_TIMEOUT)
         .timeout(OLLAMA_PULL_TIMEOUT)
+        .read_timeout(Duration::from_secs(1))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()
@@ -1576,6 +1588,7 @@ fn build_ollama_pull_client() -> Result<reqwest::blocking::Client, String> {
 }
 
 fn pull_ollama_model_inner(app: &tauri::AppHandle, requested_model: &str) -> Result<(), String> {
+    super::ollama_setup::check_setup_cancelled()?;
     let model = normalize_ollama_pull_model(requested_model)?;
     let base_url = normalize_ollama_base_url(None)?;
     if !ollama_pull_url_is_loopback(&base_url) {
@@ -1584,11 +1597,13 @@ fn pull_ollama_model_inner(app: &tauri::AppHandle, requested_model: &str) -> Res
     let client = build_ollama_pull_client()?;
 
     emit_ollama_pull_progress(app, "starting", None, None, None);
+    super::ollama_setup::check_setup_cancelled()?;
     let response = client
         .post(ollama_endpoint(&base_url, "/api/pull"))
         .json(&json!({ "model": model, "stream": true }))
         .send()
         .map_err(|_| "Не удалось подключиться к Ollama для загрузки модели.".to_string())?;
+    super::ollama_setup::check_setup_cancelled()?;
     let status = response.status();
     if !status.is_success() {
         return Err(ollama_pull_http_error(response, status.as_u16()));
@@ -1625,9 +1640,18 @@ fn read_ollama_pull_stream(
     let mut stream_bytes = 0_u64;
 
     loop {
-        let read = response
-            .read(&mut read_buffer)
-            .map_err(|_| "Не удалось прочитать поток загрузки Ollama.".to_string())?;
+        super::ollama_setup::check_setup_cancelled()?;
+        let read = match response.read(&mut read_buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                super::ollama_setup::check_setup_cancelled()?;
+                continue;
+            }
+            Err(_) => {
+                super::ollama_setup::check_setup_cancelled()?;
+                return Err("Не удалось прочитать поток загрузки Ollama.".into());
+            }
+        };
         if read == 0 {
             break;
         }
