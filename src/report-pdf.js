@@ -170,13 +170,52 @@ export function generateReportPdf(documentData, findings = []) {
   const safeFindings = findings.filter((finding) => (
     finding && typeof finding === 'object' && !isRejectedFinding(finding)
   ));
-  const reportWindow = window.open('', '_blank');
-  if (!reportWindow) throw new Error('Не удалось открыть отчёт. Разрешите новое окно и повторите экспорт.');
+  let reportWindow = null;
+  try {
+    reportWindow = window.open('', '_blank');
+  } catch {
+    // Desktop WebViews can reject popup creation; print through an iframe instead.
+  }
+  if (reportWindow) {
+    reportWindow.opener = null;
+    reportWindow.document.open();
+    reportWindow.document.write(reportHtml(safeDocument, safeFindings));
+    reportWindow.document.close();
+  } else {
+    const frame = document.createElement('iframe');
+    frame.title = 'Отчёт для экспорта в PDF';
+    frame.tabIndex = -1;
+    frame.setAttribute('aria-hidden', 'true');
+    frame.style.cssText = 'position:fixed;left:-10000px;top:0;width:1px;height:1px;border:0';
+    document.body.append(frame);
 
-  reportWindow.opener = null;
-  reportWindow.document.open();
-  reportWindow.document.write(reportHtml(safeDocument, safeFindings));
-  reportWindow.document.close();
+    const frameWindow = frame.contentWindow;
+    if (!frameWindow) {
+      frame.remove();
+      throw new Error('Не удалось подготовить отчёт к печати.');
+    }
+
+    const cleanup = () => frame.remove();
+    frameWindow.addEventListener('afterprint', cleanup, { once: true });
+    try {
+      frameWindow.document.open();
+      frameWindow.document.write(reportHtml(safeDocument, safeFindings));
+      frameWindow.document.close();
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+    frameWindow.setTimeout(cleanup, 60_000);
+    try {
+      frameWindow.focus();
+      frameWindow.print();
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+    return frameWindow;
+  }
+
   reportWindow.focus();
   reportWindow.setTimeout(() => reportWindow.print(), 250);
   return reportWindow;
