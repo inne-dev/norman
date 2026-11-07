@@ -37,13 +37,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check release version
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: node scripts/check-release-version.mjs "$RELEASE_TAG"
-
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -67,6 +60,15 @@ jobs:
         with:
           node-version: 22
           cache: npm
+
+      - name: Set app version from GitHub tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node scripts/set-release-version.mjs "$RELEASE_TAG"
+          node scripts/check-release-version.mjs "$RELEASE_TAG"
 
       - uses: dtolnay/rust-toolchain@stable
 
