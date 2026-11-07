@@ -4,7 +4,7 @@ const PROVIDER_ICONS = {
   yandex: '/provider-logos/yandex.svg',
 };
 
-function makeProviderIcon(value, className) {
+export function makeProviderIcon(value, className) {
   const source = value === 'codex'
     ? document.documentElement.dataset.theme === 'light'
       ? '/provider-logos/openai.svg'

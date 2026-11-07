@@ -7,7 +7,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import packageInfo from '../package.json';
 import { aiConfidenceLevel, findingConfidenceLevel, isAiFinding } from './finding-confidence.js';
-import { enhanceCustomSelects } from './custom-select.js';
+import { enhanceCustomSelects, makeProviderIcon } from './custom-select.js';
 import { allModelsForRecommendation, OLLAMA_RAM_THRESHOLD_BYTES, recommendationForMemory } from './ollama-recommendations.js';
 import { generateReportPdf } from './report-pdf.js';
 import './style.css';
@@ -134,6 +134,13 @@ const ui = {
   appInfoDialog: document.querySelector('#appInfoDialog'),
   closeAppInfo: document.querySelector('#closeAppInfo'),
   appVersion: document.querySelector('#appVersion'),
+  ollamaDownloadStatus: document.querySelector('#ollamaDownloadStatus'),
+  ollamaDownloadLabel: document.querySelector('#ollamaDownloadLabel'),
+  ollamaDownloadProgress: document.querySelector('#ollamaDownloadProgress'),
+  ollamaDownloadPercent: document.querySelector('#ollamaDownloadPercent'),
+  headerAiStatus: document.querySelector('#headerAiStatus'),
+  headerAiProviderIcon: document.querySelector('#headerAiProviderIcon'),
+  headerAiReasoning: document.querySelector('#headerAiReasoning'),
   aiReviewDialog: document.querySelector('#aiReviewDialog'),
   aiReviewTitle: document.querySelector('#aiReviewTitle'),
   closeAiReview: document.querySelector('#closeAiReview'),
@@ -286,6 +293,28 @@ function syncCodexSettingsUI() {
   renderCodexStatus();
   renderAiAnalysisNote();
   customSelects.refresh();
+  renderHeaderAiStatus();
+}
+
+function renderHeaderAiStatus() {
+  ui.headerAiStatus.hidden = !codexSettings.enabled;
+  if (!codexSettings.enabled) return;
+
+  const icon = makeProviderIcon(codexSettings.provider, 'custom-select-icon');
+  ui.headerAiProviderIcon.replaceChildren(...(icon ? [icon] : []));
+
+  const reasoning = codexSettings.provider === 'codex'
+    ? ui.codexReasoning.selectedOptions[0]?.textContent?.trim() || ''
+    : '';
+  ui.headerAiReasoning.hidden = !reasoning;
+  ui.headerAiReasoning.textContent = reasoning;
+
+  const description = [
+    aiProviderLabel(codexSettings.provider),
+    ...(reasoning ? [`Уровень рассуждения: ${reasoning}`] : []),
+  ];
+  ui.headerAiStatus.title = description.join(' · ');
+  ui.headerAiStatus.setAttribute('aria-label', description.join('. '));
 }
 
 let sourceTargets = new Map();
@@ -302,6 +331,7 @@ function setTheme(theme) {
   const selectedTheme = theme === 'light' ? 'light' : 'dark';
   document.documentElement.dataset.theme = selectedTheme;
   customSelects.refresh();
+  renderHeaderAiStatus();
   for (const input of ui.settingsDialog.querySelectorAll('input[name="theme"]')) {
     input.checked = input.value === selectedTheme;
   }
@@ -414,9 +444,18 @@ function installStatus(message, stateName = 'loading') {
   ui.welcomeInstallStatus.hidden = false;
 }
 
+function ollamaInstallFailureMessage(error) {
+  const detail = messageFrom(error);
+  return `Не удалось завершить установку Ollama. ${detail} Нажмите «Повторить установку»: приложение заново проверит Ollama и продолжит настройку. Если ошибка повторится, проверьте подключение к интернету и свободное место.`;
+}
+
 function setWelcomeInstallBusy(busy) {
   welcomeInstallInProgress = busy;
   ui.welcomeInstallOllama.disabled = busy;
+  if (busy) ui.welcomeInstallOllama.textContent = 'Устанавливаем Ollama…';
+  else if (!welcomeInstallComplete && ui.welcomeInstallStatus.dataset.state === 'error') {
+    ui.welcomeInstallOllama.textContent = 'Повторить установку';
+  }
   ui.welcomeOpenSettings.disabled = busy;
   ui.continueWithoutAi.disabled = busy;
   ui.closeWelcome.disabled = busy;
@@ -434,6 +473,25 @@ function humanizeOllamaPullStatus(status) {
     success: 'Модель загружена.',
   };
   return labels[status] || (status ? `Загрузка модели: ${status}` : 'Загружаем модель…');
+}
+
+function renderOllamaDownloadStatus(model, payload = {}) {
+  const total = Number(payload.total);
+  const completed = Number(payload.completed);
+  const percent = payload.status === 'success'
+    ? 100
+    : Number.isFinite(total) && total > 0 && Number.isFinite(completed)
+      ? Math.floor(Math.min(100, Math.max(0, completed / total * 100)))
+      : 0;
+
+  ui.ollamaDownloadLabel.textContent = `Скачиваем ${model.name}`;
+  ui.ollamaDownloadProgress.value = percent;
+  ui.ollamaDownloadPercent.textContent = `${percent}%`;
+  ui.ollamaDownloadStatus.hidden = false;
+}
+
+function hideOllamaDownloadStatus() {
+  ui.ollamaDownloadStatus.hidden = true;
 }
 
 async function waitForLocalOllama(onStatus = installStatus) {
@@ -479,6 +537,7 @@ async function installOllamaModel(selected, onStatus, onProgress) {
         return;
       }
       onProgress(payload, 'pull');
+      renderOllamaDownloadStatus(selected, payload);
       onStatus(Number.isFinite(payload.total) && payload.total > 0
         ? `${humanizeOllamaPullStatus(payload.status)} ${formatDownloadedBytes(payload.completed)} из ${formatDownloadedBytes(payload.total)}`
         : humanizeOllamaPullStatus(payload.status));
@@ -495,6 +554,7 @@ async function installOllamaModel(selected, onStatus, onProgress) {
     await waitForLocalOllama(onStatus);
 
     onStatus(`Скачиваем ${selected.name} (${selected.size})…`);
+    renderOllamaDownloadStatus(selected);
     await invoke('pull_ollama_model', { model: selected.tag });
     const installedStatus = await invoke('get_ollama_status', { baseUrl: 'http://127.0.0.1:11434' });
     if (!Array.isArray(installedStatus?.models) || !installedStatus.models.includes(selected.tag)) {
@@ -505,6 +565,7 @@ async function installOllamaModel(selected, onStatus, onProgress) {
     if (ollamaInstallCancellationRequested) throwIfOllamaSetupCancelled();
     throw error;
   } finally {
+    hideOllamaDownloadStatus();
     stopInstallListening();
     stopPullListening();
     ollamaInstallInProgress = false;
@@ -543,7 +604,7 @@ async function installOllamaFromWelcome() {
     ui.welcomeProgress.value = 100;
     installStatus(`${selected.name} установлена. ИИ пока выключен; включить его можно в настройках.`, 'ready');
   } catch (error) {
-    installStatus(messageFrom(error), 'error');
+    installStatus(ollamaInstallFailureMessage(error), 'error');
   } finally {
     setWelcomeInstallBusy(false);
     if (welcomeInstallComplete) {
@@ -1524,12 +1585,17 @@ function renderOllamaSetup() {
   const selected = recommendedModels.find(({ tag }) => tag === ui.ollamaSetupModel.value);
   const selectedIsInstalled = selected && ollamaStatus.models.includes(selected.tag);
   ui.ollamaSetupModel.disabled = !selected || ollamaInstallInProgress || !canOpenSetup;
-  ui.installOllamaFromSettings.disabled = !selected || ollamaInstallInProgress || !canOpenSetup || selectedIsInstalled;
-  ui.installOllamaFromSettings.textContent = selectedIsInstalled
-    ? `${selected.name} уже установлена`
-    : selected
-      ? `Установить Ollama и скачать ${selected.name}`
-      : 'Установить Ollama и скачать модель';
+  const retryAvailable = !ui.ollamaSetupStatus.hidden && ui.ollamaSetupStatus.dataset.state === 'error';
+  ui.installOllamaFromSettings.disabled = !selected || ollamaInstallInProgress || !canOpenSetup || (selectedIsInstalled && !retryAvailable);
+  if (retryAvailable && selected) {
+    ui.installOllamaFromSettings.textContent = `Повторить установку ${selected.name}`;
+  } else if (selectedIsInstalled) {
+    ui.installOllamaFromSettings.textContent = `${selected.name} уже установлена`;
+  } else if (selected) {
+    ui.installOllamaFromSettings.textContent = `Установить Ollama и скачать ${selected.name}`;
+  } else {
+    ui.installOllamaFromSettings.textContent = 'Установить Ollama и скачать модель';
+  }
   ui.ollamaSetupNote.textContent = selected
     ? `Будет скачана модель ${selected.tag} (${selected.size}). Для загрузки требуется подключение к интернету.`
     : settingsOllamaMemoryBytes
@@ -1628,7 +1694,7 @@ async function installOllamaFromSettings() {
     if (ollamaInstallCancellationRequested || error?.name === 'AbortError') {
       settingsOllamaInstallStatus('Операция остановлена. Ollama могла успеть установиться; модель можно скачать повторно.', 'cancelled');
     } else {
-      settingsOllamaInstallStatus(messageFrom(error), 'error');
+      settingsOllamaInstallStatus(ollamaInstallFailureMessage(error), 'error');
     }
   } finally {
     setSettingsOllamaInstallBusy(false);
@@ -3057,7 +3123,7 @@ ui.startOllama.addEventListener('click', () => void startOllamaFromSettings());
 ui.installOllamaFromSettings.addEventListener('click', () => void installOllamaFromSettings());
 ui.cancelOllamaSetup.addEventListener('click', () => void cancelOllamaSetupFromSettings());
 ui.ollamaSetupModel.addEventListener('change', () => {
-  if (ui.ollamaSetupStatus.dataset.state === 'ready') ui.ollamaSetupStatus.hidden = true;
+  ui.ollamaSetupStatus.hidden = true;
   renderOllamaSetup();
 });
 ui.checkCloudRuStatus.addEventListener('click', () => void refreshCloudRuStatus());
@@ -3118,7 +3184,10 @@ ui.settingsDialog.addEventListener('change', (event) => {
   }
   if (event.target === ui.yandexModel) codexSettings.yandexModel = ui.yandexModel.value;
   if (event.target === ui.codexModel) codexSettings.model = ui.codexModel.value;
-  if (event.target === ui.codexReasoning) codexSettings.reasoningEffort = ui.codexReasoning.value;
+  if (event.target === ui.codexReasoning) {
+    codexSettings.reasoningEffort = ui.codexReasoning.value;
+    renderHeaderAiStatus();
+  }
   if (event.target === ui.parallelProcesses) {
     const selected = Number(ui.parallelProcesses.value);
     codexSettings.parallelProcesses = [1, 2, 3, 4].includes(selected) ? selected : 1;

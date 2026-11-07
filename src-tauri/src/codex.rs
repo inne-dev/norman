@@ -45,10 +45,8 @@ const OLLAMA_PER_RUN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const OLLAMA_TOTAL_RUN_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const DEFAULT_OLLAMA_URL: &str = "http://127.0.0.1:11434";
 const MAX_OLLAMA_URL_BYTES: usize = 2 * 1024;
-const OLLAMA_PULL_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 const MAX_OLLAMA_PULL_MODEL_BYTES: usize = 256;
 const MAX_OLLAMA_PULL_LINE_BYTES: usize = 16 * 1024;
-const MAX_OLLAMA_PULL_STREAM_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_OLLAMA_PULL_EVENTS: usize = 10_000;
 const MAX_OLLAMA_PULL_STATUS_CHARS: usize = 256;
 const MAX_OLLAMA_PULL_ERROR_CHARS: usize = 1024;
@@ -1579,8 +1577,7 @@ fn ollama_pull_url_is_loopback(url: &Url) -> bool {
 fn build_ollama_pull_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .connect_timeout(STATUS_TIMEOUT)
-        .timeout(OLLAMA_PULL_TIMEOUT)
-        .read_timeout(Duration::from_secs(1))
+        .timeout(Duration::from_secs(1))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()
@@ -1637,7 +1634,6 @@ fn read_ollama_pull_stream(
     let mut tracker = OllamaPullProgressTracker::default();
     let mut read_buffer = [0_u8; 8 * 1024];
     let mut line = Vec::with_capacity(1024);
-    let mut stream_bytes = 0_u64;
 
     loop {
         super::ollama_setup::check_setup_cancelled()?;
@@ -1654,12 +1650,6 @@ fn read_ollama_pull_stream(
         };
         if read == 0 {
             break;
-        }
-        stream_bytes = stream_bytes
-            .checked_add(read as u64)
-            .ok_or_else(|| "Поток загрузки Ollama превысил допустимый размер.".to_string())?;
-        if stream_bytes > MAX_OLLAMA_PULL_STREAM_BYTES {
-            return Err("Поток загрузки Ollama превысил допустимый размер.".into());
         }
 
         for byte in &read_buffer[..read] {

@@ -259,7 +259,7 @@ fn latest_ollama_release_asset(asset_name: &str) -> Result<VerifiedReleaseAsset,
         .user_agent("Norman Ollama installer")
         .build()
         .map_err(|_| "Не удалось подготовить подключение к GitHub.".to_string())?;
-    let mut response = client
+    let response = client
         .get(LATEST_OLLAMA_RELEASE_API)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
@@ -341,8 +341,7 @@ fn download_verified_asset(
     check_setup_cancelled()?;
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(3 * 60 * 60))
-        .read_timeout(Duration::from_secs(1))
+        .timeout(Duration::from_secs(1))
         .redirect(reqwest::redirect::Policy::limited(10))
         .user_agent("Norman Ollama installer")
         .build()

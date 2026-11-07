@@ -28,18 +28,29 @@
           </button>
         </header>
 
-        <button class="app-info-button" id="openAppInfo" type="button" aria-label="О программе" title="О программе">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="9" />
-            <path d="M12 11v5M12 7h.01" />
-          </svg>
-        </button>
-        <button class="settings-button" id="openSettings" type="button" aria-label="Настройки" title="Настройки">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M21 4h-7M10 4H3m18 8h-9m-4 0H3m18 8h-5m-4 0H3" />
-            <path d="M14 2v4M8 10v4m8 4v4" />
-          </svg>
-        </button>
+        <div class="header-actions">
+          <div class="ollama-download-status" id="ollamaDownloadStatus" role="status" aria-live="polite" aria-atomic="true" hidden>
+            <span class="ollama-download-label" id="ollamaDownloadLabel"></span>
+            <progress id="ollamaDownloadProgress" max="100" value="0" aria-hidden="true"></progress>
+            <span class="ollama-download-percent" id="ollamaDownloadPercent"></span>
+          </div>
+          <div class="header-ai-status" id="headerAiStatus" role="group" aria-label="Настройки проверки с помощью ИИ" hidden>
+            <span id="headerAiProviderIcon"></span>
+            <span class="header-ai-reasoning" id="headerAiReasoning" hidden></span>
+          </div>
+          <button class="app-info-button" id="openAppInfo" type="button" aria-label="О программе" title="О программе">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 11v5M12 7h.01" />
+            </svg>
+          </button>
+          <button class="settings-button" id="openSettings" type="button" aria-label="Настройки" title="Настройки">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M21 4h-7M10 4H3m18 8h-9m-4 0H3m18 8h-5m-4 0H3" />
+              <path d="M14 2v4M8 10v4m8 4v4" />
+            </svg>
+          </button>
+        </div>
 
         <div class="error-banner global-error" id="errorBanner" role="alert" hidden>
           <span id="errorText"></span>
