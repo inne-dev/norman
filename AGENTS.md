@@ -34,6 +34,12 @@ Read `PRODUCT.md` before product or UI changes. Норман is a cross-platform
 - Keep labels short, make keyboard focus visible, and honor reduced-motion preferences.
 - Every visible control must work and include empty, loading, success, and error states.
 
+## Release notes
+
+- GitHub release notes are generated from merged PR titles and labels when a `v*` tag is released. Send changes through PRs; direct commits do not create individual entries.
+- Set the PR title in Conventional Commit format, for example `feat: ...`, `fix: ...`, `docs: ...`, `refactor: ...`, or `chore: ...`. With squash merges, use the same title for the squash commit.
+- Apply one matching PR label so the entry lands in the right category: `breaking-change`, `enhancement`, `bug`, `documentation`, or `maintenance`. Use `skip-changelog` only for PRs that should be excluded from release notes.
+
 ## Acceptance
 
 - `npm run tauri dev` starts the desktop app where the required toolchain is installed.
