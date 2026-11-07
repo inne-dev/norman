@@ -263,7 +263,12 @@ select:focus-visible,
 }
 
 html.macos-titlebar-overlay .app-bar {
+  min-height: 56px;
   padding-left: 88px;
+}
+
+html.macos-titlebar-overlay .header-actions {
+  top: 12px;
 }
 
 .app-tab-list {
