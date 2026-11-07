@@ -258,6 +258,7 @@ pub(super) async fn get_codex_status() -> CodexStatus {
 #[tauri::command]
 pub(super) async fn analyze_with_codex(
     app: tauri::AppHandle,
+    analysis_id: String,
     text: String,
     findings: Vec<Finding>,
     model: Option<String>,
@@ -265,9 +266,13 @@ pub(super) async fn analyze_with_codex(
     parallel_processes: Option<Value>,
 ) -> Result<Vec<Finding>, String> {
     let parallel_processes = normalize_parallel_processes(parallel_processes);
+    let control = super::analysis_pause_control(&app, &analysis_id)?;
+    let worker_analysis_id = analysis_id.clone();
     tokio::task::spawn_blocking(move || {
         analyze_with_ai_inner(
             &app,
+            &control,
+            &worker_analysis_id,
             &text,
             findings,
             model,
@@ -295,6 +300,7 @@ pub(super) async fn get_ollama_status(base_url: Option<String>) -> OllamaStatus 
 #[tauri::command]
 pub(super) async fn analyze_with_ollama(
     app: tauri::AppHandle,
+    analysis_id: String,
     base_url: Option<String>,
     text: String,
     findings: Vec<Finding>,
@@ -302,11 +308,15 @@ pub(super) async fn analyze_with_ollama(
     parallel_processes: Option<Value>,
 ) -> Result<Vec<Finding>, String> {
     let parallel_processes = normalize_parallel_processes(parallel_processes);
+    let control = super::analysis_pause_control(&app, &analysis_id)?;
+    let worker_analysis_id = analysis_id.clone();
     tokio::task::spawn_blocking(move || {
         let base_url = normalize_ollama_base_url(base_url.as_deref())?;
         let client = build_ollama_client(OLLAMA_PER_RUN_TIMEOUT)?;
         analyze_with_ai_inner(
             &app,
+            &control,
+            &worker_analysis_id,
             &text,
             findings,
             model,
@@ -357,6 +367,7 @@ pub(super) async fn get_cloudru_status(api_key: String) -> CloudruStatus {
 #[tauri::command]
 pub(super) async fn analyze_with_cloudru(
     app: tauri::AppHandle,
+    analysis_id: String,
     api_key: String,
     text: String,
     findings: Vec<Finding>,
@@ -365,11 +376,15 @@ pub(super) async fn analyze_with_cloudru(
     parallel_processes: Option<Value>,
 ) -> Result<Vec<Finding>, String> {
     let parallel_processes = normalize_parallel_processes(parallel_processes);
+    let control = super::analysis_pause_control(&app, &analysis_id)?;
+    let worker_analysis_id = analysis_id.clone();
     tokio::task::spawn_blocking(move || {
         let api_key = normalize_cloudru_api_key(&api_key)?;
         let client = build_cloudru_client(PER_RUN_TIMEOUT)?;
         analyze_with_ai_inner(
             &app,
+            &control,
+            &worker_analysis_id,
             &text,
             findings,
             model,
@@ -396,6 +411,7 @@ pub(super) async fn get_yandex_status(api_key: String, folder_id: String) -> Yan
 #[tauri::command]
 pub(super) async fn analyze_with_yandex(
     app: tauri::AppHandle,
+    analysis_id: String,
     api_key: String,
     folder_id: String,
     text: String,
@@ -404,12 +420,16 @@ pub(super) async fn analyze_with_yandex(
     parallel_processes: Option<Value>,
 ) -> Result<Vec<Finding>, String> {
     let parallel_processes = normalize_parallel_processes(parallel_processes);
+    let control = super::analysis_pause_control(&app, &analysis_id)?;
+    let worker_analysis_id = analysis_id.clone();
     tokio::task::spawn_blocking(move || {
         let api_key = normalize_yandex_api_key(&api_key)?;
         let folder_id = normalize_yandex_folder_id(&folder_id)?;
         let client = build_yandex_client(PER_RUN_TIMEOUT)?;
         analyze_with_ai_inner(
             &app,
+            &control,
+            &worker_analysis_id,
             &text,
             findings,
             model,
@@ -494,6 +514,8 @@ fn detect_codex_status() -> CodexStatus {
 
 fn analyze_with_ai_inner(
     app: &tauri::AppHandle,
+    control: &super::AnalysisPauseControl,
+    analysis_id: &str,
     text: &str,
     mut findings: Vec<Finding>,
     model: Option<String>,
@@ -502,6 +524,7 @@ fn analyze_with_ai_inner(
     provider: AiProvider,
 ) -> Result<Vec<Finding>, String> {
     let parallel_processes = parallel_processes.clamp(1, MAX_PARALLEL_PROCESSES);
+    control.checkpoint(app, analysis_id);
     let (model, reasoning_effort) = match &provider {
         AiProvider::Codex => (
             validate_choice(model, "gpt-6-luna", &ALLOWED_MODELS, "модель")?,
@@ -655,6 +678,7 @@ fn analyze_with_ai_inner(
 
     let mut completed = 0;
     for batch_start in (0..total).step_by(parallel_processes) {
+        control.checkpoint(app, analysis_id);
         let batch_end = (batch_start + parallel_processes).min(total);
         let mut active_finding_ids = findings[batch_start..batch_end]
             .iter()
@@ -755,6 +779,7 @@ fn analyze_with_ai_inner(
     }
     let mut discovery_responses = Vec::with_capacity(discovery_jobs.len());
     for batch in discovery_jobs.chunks(parallel_processes) {
+        control.checkpoint(app, analysis_id);
         let batch_responses = thread::scope(|scope| {
             let handles = batch
                 .iter()
@@ -835,6 +860,7 @@ fn analyze_with_ai_inner(
         findings.push(finding.clone());
         emit_finding(app, finding);
     }
+    control.checkpoint(app, analysis_id);
     findings.sort_by(|left, right| {
         (left.start, left.end, &left.rule_id).cmp(&(right.start, right.end, &right.rule_id))
     });

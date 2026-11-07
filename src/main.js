@@ -199,10 +199,13 @@ const ui = {
   documentText: document.querySelector('#documentText'),
   resultCount: document.querySelector('#resultCount'),
   analysisStatus: document.querySelector('#analysisStatus'),
+  analysisPauseButton: document.querySelector('#analysisPauseButton'),
+  analysisPauseStatus: document.querySelector('#analysisPauseStatus'),
   analysisProgress: document.querySelector('#analysisProgress'),
   analysisProgressBar: document.querySelector('#analysisProgressBar'),
   analysisProgressFill: document.querySelector('#analysisProgressFill'),
   analysisProgressSteps: document.querySelector('#analysisProgressSteps'),
+  analysisSlowWarning: document.querySelector('#analysisSlowWarning'),
   findingsMessage: document.querySelector('#findingsMessage'),
   aiAnalysisNote: document.querySelector('#aiAnalysisNote'),
   retryAiAnalysis: document.querySelector('#retryAiAnalysis'),
@@ -753,10 +756,17 @@ function createDocumentTab(document) {
     analysis: 'idle',
     analysisError: '',
     analysisToken: 0,
+    slowAnalysisWarning: false,
+    slowAnalysisTimer: null,
+    slowAnalysisTimerStartedAt: 0,
+    slowAnalysisRemainingMs: 60_000,
     progress: null,
     aiAnalysis: 'idle',
     aiAnalysisMessage: '',
     aiProgress: null,
+    pauseState: 'running',
+    analysisPauseId: null,
+    pauseController: null,
   };
 }
 
@@ -852,6 +862,8 @@ function closeDocumentTab(id) {
   if (index < 0) return;
   if (state.activeId === id) saveActiveTab();
   const [closedTab] = state.tabs.splice(index, 1);
+  resetSlowAnalysisWarning(closedTab);
+  void releaseAnalysisPause(closedTab);
   closedTab.analysisToken += 1;
 
   if (state.activeId === id) {
@@ -1562,6 +1574,11 @@ function isDefaultOllamaBaseUrl(value) {
 }
 
 function renderOllamaSetup() {
+  if (codexSettings.provider !== 'ollama') {
+    ui.openOllamaSetup.hidden = true;
+    if (ui.ollamaSetupDialog.open) ui.ollamaSetupDialog.close();
+    return;
+  }
   const canOpenSetup = isTauri && isLocalOllamaBaseUrl(codexSettings.ollamaBaseUrl);
   ui.openOllamaSetup.hidden = !canOpenSetup;
   if (!canOpenSetup && !ui.ollamaSetupDialog.open) return;
@@ -1597,13 +1614,15 @@ function renderOllamaSetup() {
     ui.installOllamaFromSettings.textContent = `Повторить установку ${selected.name}`;
   } else if (selectedIsInstalled) {
     ui.installOllamaFromSettings.textContent = `${selected.name} уже установлена`;
+  } else if (selected && ollamaStatus.installed) {
+    ui.installOllamaFromSettings.textContent = `Скачать ${selected.name}`;
   } else if (selected) {
     ui.installOllamaFromSettings.textContent = `Установить Ollama и скачать ${selected.name}`;
   } else {
     ui.installOllamaFromSettings.textContent = 'Установить Ollama и скачать модель';
   }
   ui.ollamaSetupNote.textContent = selected
-    ? `Будет скачана модель ${selected.tag} (${selected.size}). Для загрузки требуется подключение к интернету.`
+    ? `${selected.tag}: ${selected.comparison}. Загрузка около ${selected.size}. Оценка приблизительная: скорость зависит от CPU/GPU и размера контекста; для загрузки нужен интернет.`
     : settingsOllamaMemoryBytes
       ? 'Для доступной рекомендации требуется не менее 8 ГБ оперативной памяти.'
       : 'Выбор модели и установка недоступны без данных об оперативной памяти.';
@@ -2055,8 +2074,146 @@ function renderFindingsMessage() {
   }
 }
 
+function analysisIsBusy(tab) {
+  return Boolean(tab && (tab.analysis === 'running'
+    || tab.aiAnalysis === 'checking' || tab.aiAnalysis === 'running'));
+}
+
+function setAnalysisPauseState(tab, pauseState) {
+  const wasPaused = tab.pauseState === 'paused';
+  if (pauseState === 'paused') pauseSlowAnalysisWarning(tab);
+  else if (wasPaused && pauseState === 'running') startSlowAnalysisWarning(tab);
+  tab.pauseState = pauseState;
+  if (tabById(tab.id) === tab && state.activeId === tab.id) reflectAnalysisTab(tab);
+  else renderDocumentTabs();
+}
+
+function createAnalysisPauseController(tab) {
+  let requested = false;
+  let resume = null;
+  return {
+    pause() {
+      requested = true;
+      setAnalysisPauseState(tab, 'pause-requested');
+    },
+    resume() {
+      requested = false;
+      const release = resume;
+      resume = null;
+      if (release) release();
+      setAnalysisPauseState(tab, 'running');
+    },
+    async checkpoint() {
+      if (!requested) return;
+      while (requested) {
+        setAnalysisPauseState(tab, 'paused');
+        await new Promise((resolve) => {
+          resume = resolve;
+          if (!requested) {
+            resume = null;
+            resolve();
+          }
+        });
+      }
+      setAnalysisPauseState(tab, 'running');
+    },
+  };
+}
+
+function renderAnalysisPauseControl() {
+  const tab = tabById(state.activeId);
+  const busy = analysisIsBusy(tab);
+  const isResuming = tab?.pauseState === 'pause-requested' || tab?.pauseState === 'paused';
+  ui.analysisPauseButton.hidden = !busy;
+  ui.analysisPauseButton.setAttribute('aria-pressed', String(Boolean(busy && isResuming)));
+  const label = isResuming ? 'Возобновить анализ' : 'Приостановить анализ';
+  ui.analysisPauseButton.setAttribute('aria-label', label);
+  ui.analysisPauseButton.title = label;
+  ui.analysisPauseButton.querySelector('[data-pause-icon]').hidden = isResuming;
+  ui.analysisPauseButton.querySelector('[data-resume-icon]').hidden = !isResuming;
+
+  const waiting = tab?.pauseState === 'pause-requested';
+  const paused = tab?.pauseState === 'paused';
+  const pauseError = tab?.pauseMessage;
+  ui.analysisPauseStatus.hidden = !busy || (!waiting && !paused && !pauseError);
+  ui.analysisPauseStatus.textContent = pauseError
+    ? `Пауза недоступна: ${pauseError}`
+    : waiting
+    ? 'Ожидание безопасной точки паузы'
+    : paused ? 'Анализ приостановлен' : '';
+}
+
+async function setBrowserCodexPause(analysisId, paused, release = false) {
+  const response = await fetch('/__norman/codex/pause', {
+    method: 'POST',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ analysisId, paused, release }),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(detail || `Не удалось изменить состояние паузы (${response.status}).`);
+  }
+}
+
+async function toggleAnalysisPause() {
+  const tab = tabById(state.activeId);
+  if (!analysisIsBusy(tab) || !tab.analysisPauseId) return;
+  tab.pauseMessage = '';
+
+  const shouldPause = tab.pauseState !== 'pause-requested' && tab.pauseState !== 'paused';
+  if (!shouldPause) {
+    const previousPauseState = tab.pauseState;
+    setAnalysisPauseState(tab, 'running');
+    try {
+      if (isTauri) {
+        await invoke('set_analysis_paused', { analysisId: tab.analysisPauseId, paused: false });
+      } else if (tab.aiAnalysis === 'checking' || tab.aiAnalysis === 'running') {
+        await setBrowserCodexPause(tab.analysisPauseId, false);
+      } else {
+        tab.pauseController?.resume();
+      }
+    } catch (error) {
+      tab.pauseMessage = messageFrom(error);
+      setAnalysisPauseState(tab, previousPauseState);
+    }
+    return;
+  }
+
+  setAnalysisPauseState(tab, 'pause-requested');
+  try {
+    if (isTauri) {
+      await invoke('set_analysis_paused', { analysisId: tab.analysisPauseId, paused: true });
+    } else if (tab.aiAnalysis === 'checking' || tab.aiAnalysis === 'running') {
+      await setBrowserCodexPause(tab.analysisPauseId, true);
+    } else {
+      tab.pauseController?.pause();
+    }
+  } catch (error) {
+    tab.pauseMessage = messageFrom(error);
+    setAnalysisPauseState(tab, 'running');
+  }
+}
+
+async function releaseAnalysisPause(tab, analysisId = tab.analysisPauseId) {
+  if (!analysisId) return;
+  tab.pauseController?.resume();
+  if (isTauri) {
+    await invoke('release_analysis_pause', { analysisId }).catch(() => {});
+  } else {
+    await setBrowserCodexPause(analysisId, false, true).catch(() => {});
+  }
+  if (tab.analysisPauseId === analysisId) {
+    tab.analysisPauseId = null;
+    tab.pauseController = null;
+    tab.pauseState = 'running';
+    tab.pauseMessage = '';
+  }
+}
+
 function renderProgress() {
   const codexBusy = state.aiAnalysis === 'checking' || state.aiAnalysis === 'running';
+  const activeTab = tabById(state.activeId);
   ui.analysisStatus.hidden = state.analysis !== 'running' && !codexBusy;
 
   const showCodexProgress = codexSettings.enabled
@@ -2064,6 +2221,9 @@ function renderProgress() {
     && state.analysis !== 'idle'
     && (state.analysis === 'running' || state.aiAnalysis !== 'idle');
   ui.analysisProgress.hidden = !showCodexProgress;
+  ui.analysisSlowWarning.hidden = !activeTab?.slowAnalysisWarning
+    || (state.analysis !== 'running' && !codexBusy);
+  renderAnalysisPauseControl();
   if (ui.analysisProgress.hidden) return;
 
   const aiProgress = state.aiProgress || {};
@@ -2592,7 +2752,7 @@ function updateAiFinding(tab, token, finding, provider) {
   reflectAnalysisTab(tab);
 }
 
-async function analyzeCodexInBrowser(input, onProgress, onFinding) {
+async function analyzeCodexInBrowser(input, onProgress, onFinding, onPauseState) {
   const response = await fetch('/__norman/codex/analyze', {
     method: 'POST',
     cache: 'no-store',
@@ -2618,6 +2778,7 @@ async function analyzeCodexInBrowser(input, onProgress, onFinding) {
     }
     if (event.type === 'progress') onProgress(event.payload || {});
     else if (event.type === 'finding') onFinding(event.payload?.finding);
+    else if (event.type === 'pause') onPauseState(Boolean(event.payload?.paused));
     else if (event.type === 'complete') complete = event.payload || {};
     else if (event.type === 'error') throw new Error(event.payload?.message || 'Проверка Codex не завершилась.');
   };
@@ -2698,6 +2859,14 @@ async function executeAiReview(tab, token, parallelProcesses) {
 
   const onProgress = (progress) => updateCodexProgress(tab, token, progress);
   const onFinding = (finding) => updateAiFinding(tab, token, finding, provider);
+  const onPauseState = (paused) => {
+    if (paused && tab.pauseState === 'pause-requested') {
+      tab.pauseMessage = '';
+      setAnalysisPauseState(tab, 'paused');
+    } else if (!paused && tab.pauseState === 'paused') {
+      setAnalysisPauseState(tab, 'running');
+    }
+  };
   const unlisten = [];
   try {
     let result;
@@ -2734,6 +2903,7 @@ async function executeAiReview(tab, token, parallelProcesses) {
             reasoningEffort: codexSettings.reasoningEffort,
             parallelProcesses,
           };
+    input.analysisId = tab.analysisPauseId;
     if (isTauri) {
       try {
         unlisten.push(await listen('ai-analysis-progress', (event) => onProgress(event.payload || {})));
@@ -2747,7 +2917,7 @@ async function executeAiReview(tab, token, parallelProcesses) {
       result = await invoke(command, input);
     } else {
       if (provider !== 'codex') throw new Error(`Проверка ${providerLabel} доступна только в настольном приложении.`);
-      result = await analyzeCodexInBrowser(input, onProgress, onFinding);
+      result = await analyzeCodexInBrowser(input, onProgress, onFinding, onPauseState);
     }
     if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
     const resultFindings = Array.isArray(result) ? result : result?.findings;
@@ -2759,15 +2929,19 @@ async function executeAiReview(tab, token, parallelProcesses) {
   } catch (error) {
     if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
     tab.aiAnalysis = 'error';
-    const errorMessage = provider === 'cloudru'
-      ? redactProviderSecret(messageFrom(error), cloudRuApiKey.trim())
-      : provider === 'yandex'
-        ? redactProviderSecret(messageFrom(error), yandexApiKey.trim())
-        : messageFrom(error);
-    tab.aiAnalysisMessage = `Проверка ${providerLabel} не завершилась. Локальные результаты сохранены. ${errorMessage}`;
+    tab.aiAnalysisMessage = formatAiReviewError(error);
   } finally {
     for (const stop of unlisten) stop();
   }
+}
+
+function formatAiReviewError(error) {
+  const provider = codexSettings.provider;
+  const rawMessage = messageFrom(error);
+  const detail = provider === 'cloudru'
+    ? redactProviderSecret(rawMessage, cloudRuApiKey.trim())
+    : provider === 'yandex' ? redactProviderSecret(rawMessage, yandexApiKey.trim()) : rawMessage;
+  return `Проверка ${aiProviderLabel(provider)} не завершилась. Локальные результаты сохранены. ${detail}`;
 }
 
 function render() {
@@ -2782,44 +2956,97 @@ function render() {
 
 async function executeAnalysis(tab, token) {
   if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
+  const analysisId = tab.analysisPauseId;
+  startSlowAnalysisWarning(tab);
   const parallelProcesses = codexSettings.parallelProcesses;
-  let stopListening = null;
+  const stopListening = [];
   if (isTauri) {
     try {
-      stopListening = await listen('analysis-progress', (event) => {
+      stopListening.push(await listen('analysis-progress', (event) => {
         if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
         const payload = event.payload || {};
         tab.progress = payload;
         if (Array.isArray(payload.findings)) appendFindings(payload.findings, tab);
         reflectAnalysisTab(tab);
-      });
+      }));
+      stopListening.push(await listen('analysis-pause-state', (event) => {
+        if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
+        const payload = event.payload || {};
+        if (payload.analysisId !== analysisId) return;
+        if (payload.paused && tab.pauseState === 'pause-requested') setAnalysisPauseState(tab, 'paused');
+        else if (!payload.paused && tab.pauseState === 'paused') setAnalysisPauseState(tab, 'running');
+      }));
     } catch {
-      stopListening = null;
+      // Invoke results still provide findings if event listening is unavailable.
     }
   }
 
   try {
     const result = isTauri
-      ? await invoke('analyze_text', { text: tab.document.text, parallelProcesses })
+      ? await invoke('analyze_text', { analysisId, text: tab.document.text, parallelProcesses })
       : await (await import('./browser-runtime.js')).analyzeTextInBrowser(tab.document.text, (payload) => {
         if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
         tab.progress = payload;
         if (Array.isArray(payload.findings)) appendFindings(payload.findings, tab);
         reflectAnalysisTab(tab);
-      }, parallelProcesses);
+      }, parallelProcesses, tab.pauseController);
     if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
     tab.findings = mergeFindings(tab.findings, Array.isArray(result?.findings) ? result.findings : []);
-    if (codexSettings.enabled) await executeAiReview(tab, token, parallelProcesses);
     tab.analysis = 'done';
     tab.progress = null;
+    if (codexSettings.enabled) {
+      try {
+        await executeAiReview(tab, token, parallelProcesses);
+      } catch (error) {
+        if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
+        tab.aiAnalysis = 'error';
+        tab.aiAnalysisMessage = formatAiReviewError(error);
+      }
+    }
   } catch (error) {
     if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
     tab.analysis = 'error';
     tab.analysisError = messageFrom(error);
   } finally {
-    if (stopListening) stopListening();
-    if (tabById(tab.id) === tab && token === tab.analysisToken) reflectAnalysisTab(tab);
+    stopListening.forEach((stop) => stop());
+    await releaseAnalysisPause(tab, analysisId);
+    if (tabById(tab.id) === tab && token === tab.analysisToken) {
+      resetSlowAnalysisWarning(tab);
+      reflectAnalysisTab(tab);
+    }
   }
+}
+
+function resetSlowAnalysisWarning(tab) {
+  clearTimeout(tab.slowAnalysisTimer);
+  tab.slowAnalysisTimer = null;
+  tab.slowAnalysisTimerStartedAt = 0;
+  tab.slowAnalysisRemainingMs = 60_000;
+  tab.slowAnalysisWarning = false;
+}
+
+function startSlowAnalysisWarning(tab) {
+  if (tab.slowAnalysisWarning || tab.slowAnalysisTimer || !analysisIsBusy(tab)) return;
+  tab.slowAnalysisTimerStartedAt = performance.now();
+  tab.slowAnalysisTimer = window.setTimeout(() => {
+    tab.slowAnalysisTimer = null;
+    tab.slowAnalysisTimerStartedAt = 0;
+    tab.slowAnalysisRemainingMs = 0;
+    if (tabById(tab.id) !== tab || !analysisIsBusy(tab)) return;
+    tab.slowAnalysisWarning = true;
+    if (state.activeId === tab.id) reflectAnalysisTab(tab);
+  }, tab.slowAnalysisRemainingMs);
+}
+
+function pauseSlowAnalysisWarning(tab) {
+  if (!tab.slowAnalysisTimer) return;
+  clearTimeout(tab.slowAnalysisTimer);
+  tab.slowAnalysisTimer = null;
+  tab.slowAnalysisRemainingMs = Math.max(
+    0,
+    tab.slowAnalysisRemainingMs - (performance.now() - tab.slowAnalysisTimerStartedAt),
+  );
+  tab.slowAnalysisTimerStartedAt = 0;
 }
 
 function reflectAnalysisTab(tab) {
@@ -2844,6 +3071,11 @@ function runAnalysis(tabId = state.activeId) {
     || tab.aiAnalysis === 'checking' || tab.aiAnalysis === 'running') return Promise.resolve();
 
   const token = ++tab.analysisToken;
+  tab.analysisPauseId = `${tab.id}:${token}`;
+  tab.pauseState = 'running';
+  tab.pauseMessage = '';
+  tab.pauseController = isTauri ? null : createAnalysisPauseController(tab);
+  resetSlowAnalysisWarning(tab);
   tab.analysis = 'running';
   tab.analysisError = '';
   tab.findings = [];
@@ -2854,10 +3086,11 @@ function runAnalysis(tabId = state.activeId) {
   tab.aiProgress = null;
   reflectAnalysisTab(tab);
 
-  const job = analysisQueue.then(
-    () => executeAnalysis(tab, token),
-    () => executeAnalysis(tab, token),
-  );
+  return enqueueAnalysisJob(() => executeAnalysis(tab, token));
+}
+
+function enqueueAnalysisJob(run) {
+  const job = analysisQueue.then(run, run);
   analysisQueue = job.catch(() => {});
   return job;
 }
@@ -2868,8 +3101,35 @@ async function retryAiAnalysis(tabId = state.activeId) {
     || (tab.aiAnalysis !== 'error' && tab.aiAnalysis !== 'unavailable')
     || !codexSettings.enabled) return;
 
-  // A retry is a new full run: local rules and every AI stage start again without cached answers.
-  return runAnalysis(tab.id);
+  const token = ++tab.analysisToken;
+  const analysisId = `${tab.id}:${token}`;
+  tab.analysisPauseId = analysisId;
+  tab.pauseState = 'running';
+  tab.pauseMessage = '';
+  tab.pauseController = isTauri ? null : createAnalysisPauseController(tab);
+  resetSlowAnalysisWarning(tab);
+  tab.aiAnalysis = 'checking';
+  tab.aiAnalysisMessage = '';
+  tab.aiProgress = null;
+  reflectAnalysisTab(tab);
+
+  return enqueueAnalysisJob(async () => {
+    if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
+    startSlowAnalysisWarning(tab);
+    try {
+      await executeAiReview(tab, token, codexSettings.parallelProcesses);
+    } catch (error) {
+      if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
+      tab.aiAnalysis = 'error';
+      tab.aiAnalysisMessage = formatAiReviewError(error);
+    } finally {
+      await releaseAnalysisPause(tab, analysisId);
+      if (tabById(tab.id) === tab && token === tab.analysisToken) {
+        resetSlowAnalysisWarning(tab);
+        reflectAnalysisTab(tab);
+      }
+    }
+  });
 }
 
 async function receiveDocument(load) {
@@ -3284,6 +3544,7 @@ ui.textPanel.addEventListener('scroll', scheduleFindingToSourceScroll, { passive
 
 ui.retryAnalysis.addEventListener('click', () => runAnalysis());
 ui.retryAiAnalysis.addEventListener('click', () => { void retryAiAnalysis(); });
+ui.analysisPauseButton.addEventListener('click', () => { void toggleAnalysisPause(); });
 ui.dismissError.addEventListener('click', () => {
   state.loadError = '';
   renderError();

@@ -306,8 +306,8 @@
             <button class="modal-close" id="closeOllamaSetup" type="button" aria-label="Закрыть"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg></button>
           </div>
           <section class="ollama-setup" id="ollamaSetup" aria-labelledby="ollamaSetupTitle">
-            <h3 id="ollamaSetupTitle">Установить Ollama на этом устройстве</h3>
-            <p>Ollama запускает ИИ-модели локально: документы и вычисления остаются на этом компьютере.</p>
+            <h3 id="ollamaSetupTitle">Выбрать модель Ollama</h3>
+            <p>Модели работают локально. Можно скачать другую модель, даже если на устройстве уже установлена одна.</p>
             <p class="ollama-setup-memory" id="ollamaSetupMemory" aria-live="polite"></p>
             <label class="codex-field" for="ollamaSetupModel">
               <span>Подходящая модель</span>
@@ -428,13 +428,33 @@
                     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 7.5h.01" /></svg>
                   </summary>
                   <ul class="confidence-legend-popover">
-                    <li class="confidence-legend-item" data-confidence="high">А = Вероятнее всего нарушение</li>
-                    <li class="confidence-legend-item" data-confidence="medium">Б = Вероятно нарушение</li>
-                    <li class="confidence-legend-item" data-confidence="low">В = Возможно нарушение</li>
-                    <li class="confidence-legend-item" data-confidence="likely-false">× = Сигнал не подтверждён</li>
-                    <li class="confidence-legend-item" data-confidence="unknown">? = Уровень не указан</li>
+                    <li class="confidence-legend-item" data-confidence="high">
+                      <span class="confidence-indicator" aria-hidden="true">А</span>
+                      <span><span class="visually-hidden">А</span> = Вероятнее всего нарушение</span>
+                    </li>
+                    <li class="confidence-legend-item" data-confidence="medium">
+                      <span class="confidence-indicator" aria-hidden="true">Б</span>
+                      <span><span class="visually-hidden">Б</span> = Вероятно нарушение</span>
+                    </li>
+                    <li class="confidence-legend-item" data-confidence="low">
+                      <span class="confidence-indicator" aria-hidden="true">В</span>
+                      <span><span class="visually-hidden">В</span> = Возможно нарушение</span>
+                    </li>
+                    <li class="confidence-legend-item" data-confidence="likely-false">
+                      <span class="confidence-indicator" aria-hidden="true">×</span>
+                      <span><span class="visually-hidden">×</span> = Сигнал не подтверждён</span>
+                    </li>
+                    <li class="confidence-legend-item" data-confidence="unknown">
+                      <span class="confidence-indicator" aria-hidden="true">?</span>
+                      <span><span class="visually-hidden">?</span> = Уровень не указан</span>
+                    </li>
                   </ul>
                 </details>
+                <button class="analysis-pause-button" id="analysisPauseButton" type="button" aria-label="Приостановить анализ" title="Приостановить анализ" hidden>
+                  <svg data-pause-icon viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6v12M15 6v12" /></svg>
+                  <svg data-resume-icon viewBox="0 0 24 24" aria-hidden="true" hidden><path d="m9 6 10 6-10 6z" /></svg>
+                </button>
+                <span class="analysis-pause-status" id="analysisPauseStatus" role="status" aria-live="polite" hidden></span>
               </div>
             </div>
 
@@ -451,6 +471,9 @@
                 <span class="analysis-progress-fill" id="analysisProgressFill"></span>
               </div>
               <ol class="analysis-progress-steps" id="analysisProgressSteps" aria-label="Этапы анализа"></ol>
+              <p class="analysis-slow-warning" id="analysisSlowWarning" role="status" aria-live="polite" aria-atomic="true" hidden>
+                Анализ одной записи занимает больше времени, чем ожидалось. Это может быть связано с медленным интернетом или невысокой производительностью устройства. Для сохранения качества не рекомендуем снижать уровень рассуждений модели или выбирать более старую модель: это может отрицательно повлиять на результат анализа.
+              </p>
             </div>
 
             <div class="findings-content">
