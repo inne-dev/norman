@@ -157,12 +157,10 @@ const ui = {
   aiReviewLiveMessages: document.querySelector('#aiReviewLiveMessages'),
   aiReviewLiveTyping: document.querySelector('#aiReviewLiveTyping'),
   aiReviewResultSection: document.querySelector('#aiReviewResultSection'),
-  aiReviewReasoningDetails: document.querySelector('#aiReviewReasoningDetails'),
   aiReviewResultsList: document.querySelector('#aiReviewResultsList'),
   aiReviewExcerpt: document.querySelector('#aiReviewExcerpt'),
   aiReviewRuleSection: document.querySelector('#aiReviewRuleSection'),
   aiReviewRuleExplanation: document.querySelector('#aiReviewRuleExplanation'),
-  aiReviewRationale: document.querySelector('#aiReviewRationale'),
   aiReviewConfidence: document.querySelector('#aiReviewConfidence'),
   aiReviewConfidenceMarker: document.querySelector('#aiReviewConfidenceMarker'),
   aiReviewDecision: document.querySelector('#aiReviewDecision'),
@@ -514,7 +512,7 @@ function humanizeOllamaPullStatus(status) {
     reconnecting: 'Соединение прервалось, переподключаемся…',
     success: 'Модель загружена.',
   };
-  return labels[status] || (status ? `Загрузка модели: ${status}` : 'Загружаем модель…');
+  return labels[status] || 'Загружаем модель…';
 }
 
 function renderOllamaDownloadStatus(model, payload = {}) {
@@ -867,6 +865,8 @@ function createDocumentTab(document) {
     aiReviewUpdates: new Map(),
     aiReviewStreams: new Map(),
     aiReviewOutputs: new Map(),
+    aiReviewStepStartedAt: new Map(),
+    aiReviewDurations: new Map(),
     aiReviewAbortController: null,
     selectedId: null,
     analysis: 'idle',
@@ -875,7 +875,7 @@ function createDocumentTab(document) {
     slowAnalysisWarning: false,
     slowAnalysisTimer: null,
     slowAnalysisTimerStartedAt: 0,
-    slowAnalysisRemainingMs: 60_000,
+    slowAnalysisRemainingMs: 3 * 60_000,
     progress: null,
     aiAnalysis: 'idle',
     aiAnalysisMessage: '',
@@ -1782,6 +1782,7 @@ function renderOllamaSetup() {
     ui.ollamaSetupMemory.textContent = 'Определяем объём оперативной памяти…';
     ui.ollamaSetupModel.replaceChildren();
     ui.ollamaSetupNote.textContent = '';
+    ui.ollamaSetupNote.hidden = true;
     ui.installOllamaFromSettings.disabled = true;
     customSelects.refresh();
     return;
@@ -1796,7 +1797,11 @@ function renderOllamaSetup() {
 
   const recommendedModels = allModelsForRecommendation(settingsOllamaRecommendation);
   const previousSelection = ui.ollamaSetupModel.value;
-  ui.ollamaSetupModel.replaceChildren(...recommendedModels.map(({ name, tag, size }) => new Option(`${name} · ${size}`, tag)));
+  ui.ollamaSetupModel.replaceChildren(...recommendedModels.map(({ name, tag, size, comparison }) => {
+    const option = new Option(`${name} · ${size}`, tag);
+    option.dataset.description = comparison;
+    return option;
+  }));
   if (recommendedModels.some(({ tag }) => tag === previousSelection)) ui.ollamaSetupModel.value = previousSelection;
   else if (settingsOllamaRecommendation) ui.ollamaSetupModel.value = settingsOllamaRecommendation.recommended.tag;
 
@@ -1817,10 +1822,11 @@ function renderOllamaSetup() {
     ui.installOllamaFromSettings.textContent = 'Установить Ollama и скачать модель';
   }
   ui.ollamaSetupNote.textContent = selected
-    ? selected.comparison
+    ? ''
     : settingsOllamaMemoryBytes
       ? 'Нет подходящих моделей для этого устройства.'
       : 'Не удалось подобрать модель.';
+  ui.ollamaSetupNote.hidden = Boolean(selected);
   customSelects.refresh();
 }
 
@@ -2663,13 +2669,24 @@ function openAiReview(key) {
   ui.aiReviewSingleContent.hidden = false;
   ui.aiReviewResultsList.hidden = true;
   ui.aiReviewResultsList.replaceChildren();
-  ui.aiReviewReasoningDetails.open = false;
   ui.aiReviewLiveStatus.dataset.findingKey = key;
   ui.aiReviewLiveStatus.dataset.watching = String(failed || ['active', 'queued'].includes(findingVerifyStatus(key)));
   ui.aiReviewLiveStatus.dataset.lastStage = '';
   ui.aiReviewLiveMessages.replaceChildren();
   ui.aiReviewDialog.showModal();
   renderAiReviewDialog();
+}
+
+function recordAiReviewDuration(tab, findingId, reviewNumber) {
+  const startedAt = tab.aiReviewStepStartedAt.get(findingId);
+  if (startedAt === undefined) return null;
+
+  const durationMs = Math.max(0, performance.now() - startedAt);
+  const durations = tab.aiReviewDurations.get(findingId) || new Map();
+  durations.set(reviewNumber, durationMs);
+  tab.aiReviewDurations.set(findingId, durations);
+  tab.aiReviewStepStartedAt.delete(findingId);
+  return durationMs;
 }
 
 function updateAiReviewProgress(tab, token, payload = {}) {
@@ -2682,6 +2699,7 @@ function updateAiReviewProgress(tab, token, payload = {}) {
   if (!findingId || ![1, 2, 3].includes(reviewNumber) || !summary) return;
   if (typeof payload.signalSupported !== 'boolean') return;
 
+  recordAiReviewDuration(tab, findingId, reviewNumber);
   const updates = tab.aiReviewUpdates.get(findingId) || new Map();
   updates.set(reviewNumber, {
     reviewNumber,
@@ -2955,10 +2973,8 @@ function renderAiReviewDialog() {
     : confidence === 'likely-false'
       ? `${providerLabel} не подтвердил сигнал; при необходимости его можно проверить вручную.`
       : 'Возможный сигнал; требуется экспертная проверка.';
-  ui.aiReviewRationale.textContent = (confidence === 'likely-false' && finding.aiRejectionReason)
-    || finding.aiRationale
-    || 'Краткое обоснование не сохранено.';
-  ui.aiReviewReasoningDetails.hidden = !hasResult;
+  const rationaleText = String((confidence === 'likely-false' && finding.aiRejectionReason)
+    || finding.aiRationale || '').trim();
 
   const pauseRequested = activeTab?.pauseState === 'pause-requested';
   const paused = activeTab?.pauseState === 'paused';
@@ -2978,7 +2994,7 @@ function renderAiReviewDialog() {
   } else if (watching && hasResult && reviewUpdates.length === 0) {
     stage = 'complete';
     message = 'Проверка завершена. Результат показан ниже.';
-  } else if (watching && state.aiAnalysis === 'running') {
+  } else if (watching && state.aiAnalysis === 'running' && !hasResult) {
     stage = 'waiting';
     message = 'Ожидаю результат проверки сигнала.';
   } else if (failed) {
@@ -2988,9 +3004,19 @@ function renderAiReviewDialog() {
     stage = 'error';
     message = 'Проверка прервана до получения результата. Локальный сигнал сохранён.';
   }
+  if (hasResult) {
+    const waitingMessage = [...ui.aiReviewLiveMessages.children]
+      .find((entry) => entry.dataset.stage === 'waiting'
+        || entry.textContent === 'Ожидаю результат проверки сигнала.');
+    waitingMessage?.remove();
+    if (ui.aiReviewLiveStatus.dataset.lastStage === 'waiting') {
+      ui.aiReviewLiveStatus.dataset.lastStage = '';
+    }
+  }
   if (stage && ui.aiReviewLiveStatus.dataset.lastStage !== stage) {
     const entry = document.createElement('li');
     entry.className = 'ai-review-chat-message';
+    entry.dataset.stage = stage;
     entry.textContent = message;
     ui.aiReviewLiveMessages.append(entry);
     ui.aiReviewLiveStatus.dataset.lastStage = stage;
@@ -3042,6 +3068,16 @@ function renderAiReviewDialog() {
     const summary = entry.querySelector('.ai-review-chat-review-summary');
     const complete = Boolean(stream?.complete || update);
     detailsLabel.textContent = complete ? 'Показать ход рассуждения' : 'Модель рассуждает';
+    const durationMs = activeTab?.aiReviewDurations.get(key)?.get(reviewNumber);
+    if ((complete || failed) && Number.isFinite(durationMs)) {
+      const elapsedSeconds = Math.max(1, Math.round(durationMs / 1000));
+      const duration = document.createElement('span');
+      duration.className = 'ai-review-chat-duration';
+      duration.textContent = elapsedSeconds >= 60
+        ? `${Math.floor(elapsedSeconds / 60)} мин ${elapsedSeconds % 60} с`
+        : `${elapsedSeconds} с`;
+      detailsLabel.append(duration);
+    }
     const nextThought = stream?.text || (complete ? '' : 'Ожидаю текст рассуждения…');
     if (stream && (stream.reset || thought.dataset.initialized !== 'true')) {
       const shouldFollowLatest = thought.dataset.followLatest !== 'false';
@@ -3090,7 +3126,28 @@ function renderAiReviewDialog() {
     answer.hidden = !output?.text && !failed;
     if (output?.pendingText) output.pendingText = '';
   }
-  ui.aiReviewLiveStatus.hidden = !isChecking && !(watching && (hasResult || stage || failed));
+  let rationaleEntry = ui.aiReviewLiveMessages.querySelector('.ai-review-chat-rationale');
+  if (hasResult && rationaleText) {
+    if (!rationaleEntry) {
+      rationaleEntry = document.createElement('li');
+      rationaleEntry.className = 'ai-review-chat-message ai-review-chat-rationale';
+      const label = document.createElement('strong');
+      label.className = 'ai-review-chat-rationale-label';
+      label.textContent = 'Обоснование результата';
+      const text = document.createElement('p');
+      text.className = 'ai-review-rationale';
+      rationaleEntry.append(label, text);
+    }
+    rationaleEntry.querySelector('.ai-review-rationale').textContent = rationaleText;
+    if (ui.aiReviewLiveMessages.lastElementChild !== rationaleEntry) {
+      ui.aiReviewLiveMessages.append(rationaleEntry);
+    }
+  } else {
+    rationaleEntry?.remove();
+  }
+  const hasReviewHistory = reviewNumbers.length > 0 || Boolean(hasResult && rationaleText);
+  ui.aiReviewLiveStatus.hidden = !isChecking && !hasReviewHistory
+    && !(watching && (hasResult || stage || failed));
   ui.aiReviewLiveTyping.hidden = verifyStatus !== 'active' || paused;
   const typingLabel = ui.aiReviewLiveTyping.querySelector('.ai-review-typing-label');
   if (reviewUpdates.length === 0) {
@@ -3487,6 +3544,21 @@ function codexPayloadIsAvailable(status) {
 
 function updateCodexProgress(tab, token, progress) {
   if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
+  const activeFindingIds = progress?.phase === 'verify'
+    ? new Set((progress.activeFindingIds || []).map(String))
+    : new Set();
+  const previousActiveFindingIds = tab.aiProgress?.phase === 'verify'
+    ? (tab.aiProgress.activeFindingIds || []).map(String)
+    : [];
+  for (const findingId of previousActiveFindingIds) {
+    if (!activeFindingIds.has(findingId)) recordAiReviewDuration(tab, findingId, 1);
+  }
+  for (const findingId of activeFindingIds) {
+    if (!tab.aiReviewStepStartedAt.has(findingId)
+      && !tab.aiReviewDurations.get(findingId)?.has(1)) {
+      tab.aiReviewStepStartedAt.set(findingId, performance.now());
+    }
+  }
   tab.aiProgress = progress || null;
   reflectAnalysisTab(tab);
 }
@@ -3563,6 +3635,8 @@ async function executeAiReview(tab, token, parallelProcesses) {
   tab.aiReviewUpdates.clear();
   tab.aiReviewStreams.clear();
   tab.aiReviewOutputs.clear();
+  tab.aiReviewStepStartedAt.clear();
+  tab.aiReviewDurations.clear();
   tab.aiFailure = null;
   tab.aiReviewAbortController?.abort();
   const requestController = new AbortController();
@@ -3727,6 +3801,15 @@ async function executeAiReview(tab, token, parallelProcesses) {
       ...(typeof error.findingId === 'string' ? [error.findingId] : []),
       ...(!error.findingId ? activeFindingIds : []),
     ])];
+    for (const findingId of failedFindingIds) {
+      const reviewNumbers = [
+        ...(tab.aiReviewStreams.get(findingId)?.keys() || []),
+        ...(tab.aiReviewOutputs.get(findingId)?.keys() || []),
+      ];
+      for (const reviewNumber of new Set(reviewNumbers.length ? reviewNumbers : [1])) {
+        recordAiReviewDuration(tab, findingId, reviewNumber);
+      }
+    }
     if (failedFindingIds.length) {
       const failedFinding = tab.findings.find((finding) => failedFindingIds.includes(String(finding.id || '')));
       tab.aiFailure = {
@@ -3830,7 +3913,7 @@ function resetSlowAnalysisWarning(tab) {
   clearTimeout(tab.slowAnalysisTimer);
   tab.slowAnalysisTimer = null;
   tab.slowAnalysisTimerStartedAt = 0;
-  tab.slowAnalysisRemainingMs = 60_000;
+  tab.slowAnalysisRemainingMs = 3 * 60_000;
   tab.slowAnalysisWarning = false;
 }
 
@@ -4185,7 +4268,6 @@ ui.aiReviewDialog.addEventListener('close', () => {
   ui.aiReviewLiveStatus.hidden = true;
   ui.aiReviewLiveTyping.hidden = true;
   ui.aiReviewLiveMessages.replaceChildren();
-  ui.aiReviewReasoningDetails.open = false;
 });
 ui.showPartialAiReview.addEventListener('click', openAiReviewResults);
 ui.aiReviewDialog.addEventListener('click', (event) => {

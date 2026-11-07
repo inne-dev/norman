@@ -89,7 +89,7 @@
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
           </button>
           <img class="welcome-star" src="/welcome/star-mascot.png" alt="Звёздочка Нормана" />
-          <h2 id="welcomeTitle">Добро пожаловать в Норман</h2>
+          <h2 id="welcomeTitle">Добро пожаловать</h2>
           <p id="welcomeDescription">Для наиболее полного разбора найденных сигналов можно включить дополнительную проверку с помощью ИИ. Провайдера и модель можно выбрать в настройках.</p>
           <p class="welcome-privacy">ИИ-проверка выключена по умолчанию. Документ будет отправляться только выбранному вами провайдеру после включения этой функции.</p>
           <section class="welcome-ollama" id="welcomeOllama" aria-labelledby="welcomeOllamaTitle" hidden>
@@ -332,7 +332,6 @@
             <button class="modal-close" id="closeOllamaSetup" type="button" aria-label="Закрыть"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg></button>
           </div>
           <section class="ollama-setup" id="ollamaSetup" aria-labelledby="ollamaSetupDialogTitle">
-            <p>Ollama работает локально.</p>
             <p class="ollama-setup-memory" id="ollamaSetupMemory" aria-live="polite"></p>
             <label class="codex-field" for="ollamaSetupModel">
               <span>Модель</span>
@@ -393,10 +392,6 @@
               <h3 id="aiReviewRuleTitle">Объяснение правила</h3>
               <p class="ai-review-rule-explanation" id="aiReviewRuleExplanation"></p>
             </section>
-            <details class="ai-review-section ai-review-reasoning" id="aiReviewReasoningDetails" aria-labelledby="aiReviewReasoningTitle">
-              <summary id="aiReviewReasoningTitle">Рассуждение ИИ</summary>
-              <p class="ai-review-rationale" id="aiReviewRationale"></p>
-            </details>
           </div>
           <ol class="ai-review-content ai-review-results-list" id="aiReviewResultsList" aria-label="Результаты ИИ по сигналам" hidden></ol>
         </div>
