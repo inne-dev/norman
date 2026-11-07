@@ -1176,6 +1176,7 @@ fn load_rules() -> Result<Vec<CompiledRule>, String> {
         .collect()
 }
 
+#[cfg(test)]
 fn analyze(
     text: &str,
     rules: &[CompiledRule],
