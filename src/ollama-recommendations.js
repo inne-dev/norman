@@ -63,7 +63,7 @@ export const OLLAMA_RECOMMENDATIONS = Object.freeze([
 ]);
 
 export function recommendationForMemory(totalMemoryBytes) {
-  if (!Number.isFinite(totalMemoryBytes) || totalMemoryBytes < OLLAMA_RAM_THRESHOLD_BYTES) return null;
+  if (!Number.isFinite(totalMemoryBytes)) return null;
   const ramGb = totalMemoryBytes / 1_000_000_000;
   return [...OLLAMA_RECOMMENDATIONS].reverse().find((row) => ramGb >= row.minRamGb) || null;
 }

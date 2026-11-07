@@ -978,6 +978,54 @@ main {
   gap: 10px;
 }
 
+.ollama-setup {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+
+.ollama-setup[hidden] {
+  display: none;
+}
+
+.ollama-setup h4,
+.ollama-setup p {
+  margin: 0;
+}
+
+.ollama-setup h4 {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ollama-setup p {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.ollama-setup .ollama-setup-memory {
+  color: var(--muted-strong);
+}
+
+.ollama-setup .ollama-setup-status[data-state="error"] {
+  color: var(--text-error);
+}
+
+.ollama-setup .ollama-setup-status[data-state="ready"] {
+  color: var(--text-inline-success);
+}
+
+.ollama-setup-progress {
+  width: 100%;
+  height: 7px;
+  accent-color: var(--accent);
+}
+
 .settings-theme {
   margin: 0;
   padding: 0;
