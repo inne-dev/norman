@@ -64,6 +64,9 @@
   --text-inline-success: #91d5a7;
   --surface-error: #382a28;
   --line-error: #69473d;
+  --surface-warning: #302b1d;
+  --line-warning: #8b7439;
+  --text-warning: #f0d987;
   --accent: #336fbd;
   --accent-hover: #2e66ad;
   --accent-text: #f7fbff;
@@ -165,6 +168,9 @@
   --text-inline-success: #237548;
   --surface-error: #fff1ed;
   --line-error: #e6b7aa;
+  --surface-warning: #fff5d6;
+  --line-warning: #a37e1c;
+  --text-warning: #654a00;
   --accent-hover: #285f9e;
   --focus: #285f9e;
   --selection: #dce9f5;
@@ -1145,6 +1151,19 @@ main {
   color: var(--muted);
   font-size: 11px;
   line-height: 1.45;
+}
+
+.codex-provider-options > .codex-privacy-note {
+  margin: 0;
+}
+
+.cloudru-privacy-note {
+  padding: 8px 10px;
+  color: var(--text-warning);
+  background: var(--surface-warning);
+  border: 1px solid var(--line-warning);
+  border-radius: 7px;
+  font-size: 12px;
 }
 
 .preview-note {

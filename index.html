@@ -256,6 +256,7 @@
                   <span>API-ключ Cloud.ru</span>
                   <input class="modal-input codex-select" id="cloudRuApiKey" type="password" autocomplete="off" spellcheck="false" />
                 </label>
+                <p class="codex-privacy-note cloudru-privacy-note">Ключ действует только до закрытия приложения и не сохраняется.</p>
                 <div class="codex-field">
                   <span>Модель</span>
                   <select class="modal-input codex-select" id="cloudRuModel" disabled>
@@ -266,7 +267,6 @@
                   <p id="cloudRuStatus" role="status" aria-live="polite">Введите API-ключ и проверьте подключение.</p>
                   <button class="button button-secondary" id="checkCloudRuStatus" type="button">Проверить</button>
                 </div>
-                <p class="codex-privacy-note cloudru-privacy-note">Ключ действует только до закрытия приложения и не сохраняется.</p>
               </div>
               <div class="codex-provider-options" id="yandexOptions" hidden>
                 <label class="codex-field codex-field-text" for="yandexApiKey">
@@ -277,6 +277,7 @@
                   <span>ID каталога Yandex Cloud</span>
                   <input class="modal-input codex-select" id="yandexFolderId" type="text" autocomplete="off" spellcheck="false" />
                 </label>
+                <p class="codex-privacy-note">Нужна роль ai.languageModels.user и области ключа yc.ai.models.viewer, yc.ai.foundationModels.execute. Текст документа и сигналы передаются в Yandex AI Studio. Ключ хранится до закрытия приложения, ID каталога сохраняется в настройках.</p>
                 <div class="codex-field">
                   <span>Модель</span>
                   <select class="modal-input codex-select" id="yandexModel" disabled>
@@ -287,7 +288,6 @@
                   <p id="yandexStatus" role="status" aria-live="polite">Введите API-ключ и ID каталога, затем проверьте подключение.</p>
                   <button class="button button-secondary" id="checkYandexStatus" type="button">Проверить</button>
                 </div>
-                <p class="codex-privacy-note">Нужна роль ai.languageModels.user и области ключа yc.ai.models.viewer, yc.ai.foundationModels.execute. Текст документа и сигналы передаются в Yandex AI Studio. Ключ хранится до закрытия приложения, ID каталога сохраняется в настройках.</p>
               </div>
             </div>
           </section>
