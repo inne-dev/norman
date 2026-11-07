@@ -49,12 +49,14 @@ pub(crate) struct AnalysisPauseRegistry {
 #[derive(Default)]
 struct PauseState {
     requested: bool,
+    cancelled: bool,
 }
 
 #[derive(Default)]
 pub(crate) struct AnalysisPauseControl {
     state: Mutex<PauseState>,
     changed: Condvar,
+    active_process_groups: Mutex<HashSet<u32>>,
 }
 
 impl AnalysisPauseRegistry {
@@ -74,6 +76,19 @@ impl AnalysisPauseRegistry {
             .remove(analysis_id)
         {
             control.set_paused(false);
+        }
+    }
+
+    fn cancel_all(&self) {
+        let controls = self
+            .controls
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for control in controls {
+            control.cancel();
         }
     }
 }
@@ -99,7 +114,7 @@ impl AnalysisPauseControl {
 
     pub(crate) fn checkpoint(&self, app: &tauri::AppHandle, analysis_id: &str) {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if !state.requested {
+        if !state.requested || state.cancelled {
             return;
         }
         drop(state);
@@ -109,7 +124,7 @@ impl AnalysisPauseControl {
         );
 
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        while state.requested {
+        while state.requested && !state.cancelled {
             state = self.changed.wait(state).unwrap_or_else(|error| error.into_inner());
         }
         drop(state);
@@ -117,6 +132,71 @@ impl AnalysisPauseControl {
             "analysis-pause-state",
             serde_json::json!({ "analysisId": analysis_id, "paused": false }),
         );
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.state.lock().unwrap_or_else(|error| error.into_inner()).cancelled
+    }
+
+    pub(crate) fn register_process_group(&self, process_id: u32) {
+        let mut process_groups = self
+            .active_process_groups
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.is_cancelled() {
+            terminate_ai_process_group(process_id);
+        } else {
+            process_groups.insert(process_id);
+        }
+    }
+
+    pub(crate) fn unregister_process_group(&self, process_id: u32) {
+        self.active_process_groups
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&process_id);
+    }
+
+    fn cancel(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.cancelled = true;
+        state.requested = false;
+        self.changed.notify_all();
+        drop(state);
+
+        let process_groups = self
+            .active_process_groups
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        for process_id in process_groups {
+            terminate_ai_process_group(process_id);
+        }
+    }
+}
+
+pub(crate) fn terminate_ai_process_group(process_id: u32) {
+    #[cfg(windows)]
+    {
+        let process_id = process_id.to_string();
+        let _ = Command::new("taskkill.exe")
+            .args(["/PID", &process_id, "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(unix)]
+    {
+        let process_group = format!("-{process_id}");
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", &process_group])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
@@ -377,6 +457,15 @@ fn release_analysis_pause(app: tauri::AppHandle, analysis_id: String) {
 }
 
 #[tauri::command]
+fn cancel_ai_analysis(app: tauri::AppHandle, analysis_id: String) -> Result<(), String> {
+    if analysis_id.trim().is_empty() || analysis_id.len() > MAX_ANALYSIS_ID_BYTES {
+        return Err("Не удалось определить запуск анализа.".into());
+    }
+    app.state::<AnalysisPauseRegistry>().control(&analysis_id).cancel();
+    Ok(())
+}
+
+#[tauri::command]
 fn get_rule_catalog() -> Result<Vec<RuleSummary>, String> {
     compiled_rules()
         .map(|rules| {
@@ -395,8 +484,13 @@ fn get_rule_catalog() -> Result<Vec<RuleSummary>, String> {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(AnalysisPauseRegistry::default())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                window.app_handle().state::<AnalysisPauseRegistry>().cancel_all();
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -405,6 +499,7 @@ pub fn run() {
             analyze_text,
             set_analysis_paused,
             release_analysis_pause,
+            cancel_ai_analysis,
             get_rule_catalog,
             get_system_memory_bytes,
             codex::get_codex_status,
@@ -423,8 +518,13 @@ pub fn run() {
             codex::get_yandex_status,
             codex::analyze_with_yandex
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Норман");
+        .build(tauri::generate_context!())
+        .expect("failed to build Норман");
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            app_handle.state::<AnalysisPauseRegistry>().cancel_all();
+        }
+    });
 }
 
 pub fn import_file(path: &Path) -> Result<LoadedDocument, String> {

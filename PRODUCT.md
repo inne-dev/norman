@@ -30,6 +30,7 @@ Reviewers work with Microsoft Word and LibreOffice documents, PDFs, and public w
 
 - Cross-platform desktop target: Windows, Linux, and macOS; future server-hosted web use should remain possible.
 - Keep the deterministic first pass local and lightweight for lower-powered computers; run AI only after explicit opt-in.
+- Split full-text AI discovery into overlapping chunks and process them with the configured parallel process count.
 - Import Word-family files, LibreOffice/OpenDocument files, PDFs, and URLs. The initial implementation must state format and extraction limits clearly.
 - Show analysis progress and add findings as they are produced.
 - Prefer uBlock Origin for a live web-page preview, subject to the browser engine's extension support. On unsupported desktop platforms, keep the source preview safe and readable and clearly show the chosen preview mode.
