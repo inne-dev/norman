@@ -1281,14 +1281,16 @@ function markPageFrameReady(url, documentRef, loadToken) {
     if (pageFrameBoundDocument !== sourceDocument) {
       pageFrameBoundDocument = sourceDocument;
       sourceDocument.addEventListener('click', (event) => {
-        const mark = event.target?.closest?.('mark.norman-source-finding[data-finding-id]');
+        const selector = 'mark.norman-source-finding[data-finding-id]';
+        const mark = event.composedPath?.().find((target) => target?.matches?.(selector))
+          || event.target?.closest?.(selector);
         if (mark) {
           event.preventDefault();
           selectFinding(mark.dataset.findingId, { scrollPreview: false, focusFinding: true });
           return;
         }
         if (event.target?.closest?.('a[href]')) event.preventDefault();
-      });
+      }, { capture: true });
       sourceDocument.addEventListener('keydown', (event) => {
         const mark = event.target?.closest?.('mark.norman-source-finding[data-finding-id]');
         if (!mark || (event.key !== 'Enter' && event.key !== ' ')) return;
