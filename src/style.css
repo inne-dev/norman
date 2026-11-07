@@ -737,6 +737,17 @@ main {
   border-color: var(--accent-hover);
 }
 
+:root[data-theme="light"] #urlSubmit.button-primary {
+  color: #fff;
+  background: #005eb8;
+  border-color: #005eb8;
+}
+
+:root[data-theme="light"] #urlSubmit.button-primary:hover:not(:disabled) {
+  background: #004f9e;
+  border-color: #004f9e;
+}
+
 .button-secondary {
   background: var(--surface-raised);
 }
