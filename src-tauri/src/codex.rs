@@ -42,7 +42,10 @@ const TEMP_OLLAMA_DIAG_FILENAME: &str = "norman-ollama-diagnostics.log";
 const TEMP_OLLAMA_DIAG_MAX_BYTES: u64 = 16 * 1024;
 static TEMP_OLLAMA_DIAG_LOCK: Mutex<()> = Mutex::new(());
 const PER_RUN_TIMEOUT: Duration = Duration::from_secs(75);
+const CODEX_TOTAL_CALL_TIMEOUT: Duration = Duration::from_secs(150);
 const TOTAL_RUN_TIMEOUT: Duration = Duration::from_secs(8 * 60);
+const CODEX_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(75);
+const CODEX_RESULT_FILENAME: &str = "codex-result.json";
 const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const OLLAMA_PER_RUN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const OLLAMA_TOTAL_RUN_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -648,13 +651,20 @@ fn analyze_with_ai_inner(
     });
     for finding in &mut findings {
         finding.origin = Some("algorithm".into());
+        if !has_valid_cached_ai_review(finding) {
+            finding.ai_confidence = None;
+            finding.ai_rationale = None;
+            finding.ai_rejection_reason = None;
+        }
+    }
+    // The global pass must receive the same deterministic baseline on every run,
+    // independent of the fresh and potentially variable verification answers.
+    let mut algorithmic_findings = findings.clone();
+    for finding in &mut algorithmic_findings {
         finding.ai_confidence = None;
         finding.ai_rationale = None;
         finding.ai_rejection_reason = None;
     }
-    // The global pass must receive the same deterministic baseline on every run,
-    // independent of the fresh and potentially variable verification answers.
-    let algorithmic_findings = findings.clone();
 
     let deadline = Instant::now()
         + match &provider {
@@ -667,9 +677,15 @@ fn analyze_with_ai_inner(
     let reasoning_level = reasoning_effort.as_deref();
 
     let total = findings.len();
-    let verify_prompts = findings
+    let pending_indices = findings
         .iter()
-        .map(|finding| {
+        .enumerate()
+        .filter_map(|(index, finding)| finding.ai_confidence.is_none().then_some(index))
+        .collect::<Vec<_>>();
+    let verify_prompts = pending_indices
+        .iter()
+        .map(|&index| {
+            let finding = &findings[index];
             let rule = rules
                 .get(&finding.rule_id)
                 .ok_or_else(|| "В находке указан неизвестный ID правила.".to_string())?;
@@ -677,22 +693,25 @@ fn analyze_with_ai_inner(
             verification_prompt(&target, rule)
         })
         .collect::<Result<Vec<_>, String>>()?;
-    emit_progress(app, "verify", 0, total, &[]);
+    let mut completed = total - pending_indices.len();
+    emit_progress(app, "verify", completed, total, &[]);
 
-    let mut completed = 0;
-    for batch_start in (0..total).step_by(parallel_processes) {
+    for batch_start in (0..pending_indices.len()).step_by(parallel_processes) {
         control.checkpoint(app, analysis_id);
-        let batch_end = (batch_start + parallel_processes).min(total);
-        let mut active_finding_ids = findings[batch_start..batch_end]
+        let batch_end = (batch_start + parallel_processes).min(pending_indices.len());
+        let batch_indices = &pending_indices[batch_start..batch_end];
+        let mut active_finding_ids = batch_indices
             .iter()
-            .map(|finding| finding.id.clone())
+            .map(|&index| findings[index].id.clone())
             .collect::<Vec<_>>();
         emit_progress(app, "verify", completed, total, &active_finding_ids);
 
         let responses = thread::scope(|scope| {
-            let handles = (batch_start..batch_end)
-                .map(|index| {
-                    let prompt = &verify_prompts[index];
+            let handles = batch_indices
+                .iter()
+                .enumerate()
+                .map(|(offset, &index)| {
+                    let prompt = &verify_prompts[batch_start + offset];
                     let schema = verify_schema.clone();
                     let provider = provider.clone();
                     scope.spawn(move || {
@@ -721,13 +740,15 @@ fn analyze_with_ai_inner(
                 .collect::<Vec<_>>()
         });
 
+        let mut batch_error = None;
         for (offset, response) in responses.into_iter().enumerate() {
-            let index = batch_start + offset;
+            let index = batch_indices[offset];
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    emit_progress(app, "verify", completed, total, &[]);
-                    return Err(error);
+                    batch_error.get_or_insert(error);
+                    active_finding_ids.retain(|id| id != &findings[index].id);
+                    continue;
                 }
             };
             let validation = (|| -> Result<(), String> {
@@ -744,14 +765,19 @@ fn analyze_with_ai_inner(
                 Ok(())
             })();
             if let Err(error) = validation {
-                emit_progress(app, "verify", completed, total, &[]);
-                return Err(error);
+                batch_error.get_or_insert(error);
+                active_finding_ids.retain(|id| id != &findings[index].id);
+                continue;
             }
 
             emit_finding(app, findings[index].clone());
             active_finding_ids.retain(|id| id != &findings[index].id);
             completed += 1;
             emit_progress(app, "verify", completed, total, &active_finding_ids);
+        }
+        if let Some(error) = batch_error {
+            emit_progress(app, "verify", completed, total, &[]);
+            return Err(error);
         }
     }
 
@@ -906,6 +932,33 @@ fn validate_deterministic_finding(
         return Err("Цитата алгоритмической находки не совпадает с исходным текстом.".into());
     }
     Ok(())
+}
+
+fn has_valid_cached_ai_review(finding: &Finding) -> bool {
+    let Some(confidence) = finding.ai_confidence.as_deref() else {
+        return false;
+    };
+    let Some(rationale) = finding.ai_rationale.as_deref() else {
+        return false;
+    };
+    if !CONFIDENCE_VALUES.contains(&confidence)
+        || rationale.trim().is_empty()
+        || rationale.len() > MAX_RATIONALE_BYTES
+    {
+        return false;
+    }
+
+    if confidence == "likely_false" {
+        return finding.ai_rejection_reason.as_deref().is_some_and(|reason| {
+            !reason.trim().is_empty() && reason.chars().count() <= MAX_REJECTION_REASON_CHARS
+        });
+    }
+
+    POSSIBLE_SIGNAL_CONFIDENCE_VALUES.contains(&confidence)
+        && finding
+            .ai_rejection_reason
+            .as_deref()
+            .map_or(true, |reason| reason.trim().is_empty())
 }
 
 fn verification_target<'a>(
@@ -1336,7 +1389,8 @@ fn run_structured_prompt<T: for<'de> Deserialize<'de>>(
         return Err(format!("Превышен общий лимит {} AI-анализа.", provider.name()));
     }
     let provider_timeout = match provider {
-        AiProvider::Codex | AiProvider::Cloudru { .. } | AiProvider::Yandex { .. } => PER_RUN_TIMEOUT,
+        AiProvider::Codex => CODEX_TOTAL_CALL_TIMEOUT,
+        AiProvider::Cloudru { .. } | AiProvider::Yandex { .. } => PER_RUN_TIMEOUT,
         AiProvider::Ollama { .. } => OLLAMA_PER_RUN_TIMEOUT,
     };
     let timeout = provider_timeout.min(remaining);
@@ -1392,9 +1446,88 @@ fn run_codex_structured_prompt<T: for<'de> Deserialize<'de>>(
     reasoning_effort: &str,
     timeout: Duration,
 ) -> Result<T, String> {
-    let args = vec![
-        "exec".into(),
-        "--ephemeral".into(),
+    let result_path = working_dir.join(CODEX_RESULT_FILENAME);
+    clear_codex_result(&result_path)?;
+
+    let started = Instant::now();
+    let first_timeout = timeout.min(CODEX_ATTEMPT_TIMEOUT);
+    let first_args = codex_exec_args(None, schema_path, model, reasoning_effort);
+    let first = run_process(
+        &first_args,
+        working_dir,
+        Some(prompt),
+        first_timeout,
+        MAX_RESPONSE_BYTES,
+    )?;
+    if !first.timed_out {
+        if !first.status.success() {
+            return Err(codex_process_error(&first));
+        }
+        return read_codex_result(&result_path);
+    }
+    if let Ok(result) = read_codex_result(&result_path) {
+        return Ok(result);
+    }
+
+    let thread_id = codex_thread_id(&first.stdout).ok_or_else(|| {
+        "Codex превысил лимит времени. Не удалось продолжить исходную сессию.".to_string()
+    })?;
+    let resume_timeout = timeout
+        .saturating_sub(started.elapsed())
+        .min(CODEX_ATTEMPT_TIMEOUT);
+    if resume_timeout.is_zero() {
+        return Err("Codex превысил общий лимит времени запроса.".into());
+    }
+    clear_codex_result(&result_path)?;
+    let resume_args = codex_exec_args(
+        Some(&thread_id),
+        schema_path,
+        model,
+        reasoning_effort,
+    );
+    let continuation = "Продолжай с того места, где остановился. Верни полный итог по подключённой JSON-схеме, без пояснений.";
+    let resumed = run_process(
+        &resume_args,
+        working_dir,
+        Some(continuation),
+        resume_timeout,
+        MAX_RESPONSE_BYTES,
+    )?;
+    let resumed_thread_id = codex_thread_id(&resumed.stdout);
+    if resumed_thread_id
+        .as_ref()
+        .is_some_and(|resumed_id| !resumed_id.eq_ignore_ascii_case(&thread_id))
+    {
+        return Err("Codex не подтвердил продолжение исходной сессии.".into());
+    }
+    if let Ok(result) = read_codex_result(&result_path) {
+        return Ok(result);
+    }
+    if resumed.timed_out {
+        return Err("Codex превысил общий лимит времени запроса, включая продолжение.".into());
+    }
+    if resumed_thread_id.is_none() {
+        return Err("Codex не подтвердил продолжение исходной сессии.".into());
+    }
+    if !resumed.status.success() {
+        return Err(codex_process_error(&resumed));
+    }
+    read_codex_result(&result_path)
+}
+
+fn codex_exec_args(
+    thread_id: Option<&str>,
+    schema_path: &str,
+    model: &str,
+    reasoning_effort: &str,
+) -> Vec<OsString> {
+    let mut args = vec!["exec".into()];
+    if let Some(thread_id) = thread_id {
+        args.push("resume".into());
+        args.push(thread_id.into());
+    }
+    args.extend([
+        "--json".into(),
         "--ignore-user-config".into(),
         "--disable".into(),
         "shell_tool".into(),
@@ -1409,23 +1542,66 @@ fn run_codex_structured_prompt<T: for<'de> Deserialize<'de>>(
         "web_search=\"disabled\"".into(),
         "--output-schema".into(),
         schema_path.into(),
+        "--output-last-message".into(),
+        CODEX_RESULT_FILENAME.into(),
         "-".into(),
-    ];
-    let output = run_process(&args, working_dir, Some(prompt), timeout, MAX_RESPONSE_BYTES)?;
-    if output.timed_out {
-        return Err("Codex превысил лимит времени одного запроса.".into());
+    ]);
+    args
+}
+
+fn clear_codex_result(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("Не удалось подготовить временный файл результата Codex.".into()),
     }
-    if output.stdout_overflow || output.stderr_overflow {
-        return Err("Вывод Codex превышает допустимый лимит размера.".into());
+}
+
+fn read_codex_result<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
+    let file = fs::File::open(path)
+        .map_err(|_| "Codex не сохранил итоговый ответ в файл.".to_string())?;
+    let mut bytes = Vec::with_capacity(MAX_RESPONSE_BYTES.min(8192));
+    file.take((MAX_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Не удалось прочитать итоговый ответ Codex.".to_string())?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err("Ответ Codex превышает допустимый лимит размера.".into());
     }
-    if !output.status.success() {
-        return Err(format!(
-            "Codex CLI завершился с ошибкой (код {}). Проверьте подключение и настройки входа.",
-            output.status.code().map_or_else(|| "signal".into(), |code| code.to_string())
-        ));
-    }
-    serde_json::from_slice(&output.stdout)
+    serde_json::from_slice(&bytes)
         .map_err(|_| "Codex вернул ответ, не соответствующий JSON-схеме.".into())
+}
+
+fn codex_thread_id(events: &[u8]) -> Option<String> {
+    for line in events.split(|byte| *byte == b'\n') {
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if event.get("type").and_then(Value::as_str) != Some("thread.started") {
+            continue;
+        }
+        let thread_id = event.get("thread_id").and_then(Value::as_str)?;
+        return valid_codex_thread_id(thread_id).then(|| thread_id.to_string());
+    }
+    None
+}
+
+fn valid_codex_thread_id(thread_id: &str) -> bool {
+    let bytes = thread_id.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
+}
+
+fn codex_process_error(output: &CapturedOutput) -> String {
+    if output.stderr_overflow {
+        return "Вывод ошибок Codex превышает допустимый лимит размера.".into();
+    }
+    format!(
+        "Codex CLI завершился с ошибкой (код {}). Проверьте подключение и настройки входа.",
+        output.status.code().map_or_else(|| "signal".into(), |code| code.to_string())
+    )
 }
 
 #[derive(Deserialize)]
@@ -1775,7 +1951,9 @@ fn read_ollama_pull_stream(
                 line.clear();
             } else {
                 if line.len() >= MAX_OLLAMA_PULL_LINE_BYTES {
-                    return Err("Строка потока загрузки Ollama слишком длинная.".into());
+                    return Err(OllamaPullStreamError::Failed(
+                        "Строка потока загрузки Ollama слишком длинная.".into(),
+                    ));
                 }
                 line.push(*byte);
             }
