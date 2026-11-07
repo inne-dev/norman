@@ -1,11 +1,11 @@
 import { readFile, readdir, rename } from "node:fs/promises";
 import { join } from "node:path";
+import { releaseFilenameVersion } from "./release-version.mjs";
 
 const bundleKind = process.env.BUNDLE_KIND;
 const releaseTag = process.env.RELEASE_TAG ?? "";
-const taggedVersion = releaseTag.match(/^v?(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)$/)?.[1];
-const config = JSON.parse(await readFile("src-tauri/tauri.conf.json", "utf8"));
-const version = taggedVersion ?? config.version;
+const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+const version = releaseFilenameVersion(releaseTag, packageJson.version);
 
 const bundle = {
   dmg: {

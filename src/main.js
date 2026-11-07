@@ -13,6 +13,8 @@ import { generateReportPdf } from './report-pdf.js';
 import './style.css';
 
 const isTauri = Boolean(window.__TAURI_INTERNALS__);
+const releaseTag = import.meta.env.VITE_APP_VERSION || '';
+const displayedAppVersion = releaseTag || packageInfo.version;
 const THEME_STORAGE_KEY = 'norman-color-theme';
 const CODEX_STORAGE_KEY = 'norman-codex-settings';
 const WELCOME_STORAGE_KEY = 'norman-welcome-shown';
@@ -198,7 +200,7 @@ function setAppVersion(version) {
   ui.appVersion.textContent = version;
 }
 
-setAppVersion(packageInfo.version);
+setAppVersion(displayedAppVersion);
 
 const platform = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent;
 const currentPlatform = /win/i.test(platform) ? 'windows'
@@ -2875,9 +2877,9 @@ ui.exportReportPdf.addEventListener('click', () => {
   }
 });
 ui.openAppInfo.addEventListener('click', () => {
-  setAppVersion(packageInfo.version);
+  setAppVersion(displayedAppVersion);
   ui.appInfoDialog.showModal();
-  if (isTauri) void getVersion().then(setAppVersion).catch(() => {});
+  if (isTauri && !releaseTag) void getVersion().then(setAppVersion).catch(() => {});
 });
 ui.closeAppInfo.addEventListener('click', () => ui.appInfoDialog.close());
 ui.appInfoDialog.addEventListener('click', (event) => {
