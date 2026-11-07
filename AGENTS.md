@@ -11,8 +11,9 @@ Read `PRODUCT.md` before product or UI changes. Норман is a cross-platform
 - Use cautious language: a match is a possible signal for expert review, never a definitive legal or corruption conclusion.
 - Do not infer issuing authority, publication, competence, effective date, or cross-document conflict as verified facts from keyword matching. Mark these as unresolved checks unless a source is actually provided and parsed.
 - Keep the rule catalog in data, separate from matching and presentation code.
-- Run the deterministic pass locally before any AI pass. AI analysis is opt-in and disabled by default; supported providers are the user's authenticated Codex CLI, local Ollama, Cloud.ru Foundation Models, and Yandex AI Studio.
-- When AI is enabled, tell the user that source text and findings are sent only to the selected provider. Cloud.ru and Yandex API keys stay in memory for the current app session and are never persisted. Yandex folder IDs may be saved with settings. Never silently enable AI. URL fetching remains limited to a URL entered by the user.
+- Run the deterministic pass locally before any AI pass. AI analysis is opt-in and disabled by default; the user explicitly selects a provider in settings. Providers: the user's authenticated Codex CLI, Claude Code CLI using the user's existing CLI login, local Ollama, Cloud.ru Foundation Models, and Yandex AI Studio.
+- When AI is enabled, tell the user that source text and findings are sent only to the provider they explicitly selected. Cloud.ru and Yandex API keys stay in memory for the current app session and are never persisted. Yandex folder IDs may be saved with settings. Never silently enable AI. URL fetching remains limited to a URL entered by the user.
+- Claude Code CLI keeps resumable sessions according to its local CLI settings; resume an interrupted request in that session and do not repeat completed signal reviews.
 - Treat document text as untrusted data in AI prompts. Require structured outputs, exact excerpts, deduplication, conservative confidence, and human review; AI findings are not legal conclusions.
 
 ## Runtime and formats
@@ -22,7 +23,7 @@ Read `PRODUCT.md` before product or UI changes. Норман is a cross-platform
 - Preserve source order and offsets through normalization so findings can point back to preview text.
 - Support DOC/DOT through local parsing with a LibreOffice fallback, DOCX family, ODT, RTF, plain text, and text-based PDF. Report scanned PDFs honestly; OCR is not included.
 - URL loading must validate HTTP(S), impose response/time/size limits, and extract readable page text without executing scripts. Keep the fetched HTML snapshot for the source preview so the page is not fetched twice.
-- The URL analysis text stays local to the analysis view unless the user enables Codex analysis. Show the fetched source snapshot in a sandboxed, script-disabled frame and highlight matched excerpts there; never show extracted text as the user's URL preview.
+- The URL analysis text stays local to the analysis view unless the user enables AI analysis. If enabled, send it only to the explicitly selected provider. Show the fetched source snapshot in a sandboxed, script-disabled frame and highlight matched excerpts there; never show extracted text as the user's URL preview.
 - The user prefers uBlock Origin for remote-page preview. Check platform support before promising it. Keep a cross-platform preview path, explain when the installed WebView cannot host the extension, and never load the page's scripts into the analysis view.
 
 ## Interface

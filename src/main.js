@@ -23,6 +23,8 @@ const DEFAULT_CODEX_SETTINGS = Object.freeze({
   provider: 'codex',
   model: 'gpt-6-luna',
   reasoningEffort: 'high',
+  claudeModel: 'sonnet',
+  claudeReasoningEffort: 'high',
   ollamaBaseUrl: 'http://127.0.0.1:11434',
   ollamaModel: '',
   cloudRuModel: '',
@@ -64,6 +66,8 @@ let rejectedFindingsCount = null;
 let renderedFindingsOrderSignature = '';
 let codexStatus = { checked: false, installed: false, authenticated: false, version: '', message: '' };
 let codexStatusRequest = null;
+let claudeStatus = { checked: false, installed: false, authenticated: false, version: '', message: '' };
+let claudeStatusRequest = null;
 let ollamaStatus = { checked: false, installed: false, available: false, models: [], message: '' };
 let ollamaStatusRequestId = 0;
 let ollamaStarting = false;
@@ -165,6 +169,11 @@ const ui = {
   codexProviderOptions: document.querySelector('#codexProviderOptions'),
   codexModel: document.querySelector('#codexModel'),
   codexReasoning: document.querySelector('#codexReasoning'),
+  claudeOptions: document.querySelector('#claudeOptions'),
+  claudeModel: document.querySelector('#claudeModel'),
+  claudeReasoning: document.querySelector('#claudeReasoning'),
+  claudeStatus: document.querySelector('#claudeStatus'),
+  checkClaudeStatus: document.querySelector('#checkClaudeStatus'),
   ollamaOptions: document.querySelector('#ollamaOptions'),
   ollamaBaseUrl: document.querySelector('#ollamaBaseUrl'),
   ollamaAddressControl: document.querySelector('#ollamaAddressControl'),
@@ -253,13 +262,19 @@ function loadCodexSettings() {
       ...saved,
       enabled: saved.enabled === true,
       filterAdsInPreview: saved.filterAdsInPreview !== false,
-      provider: ['ollama', 'cloudru', 'yandex'].includes(saved.provider) ? saved.provider : 'codex',
+      provider: ['claude', 'ollama', 'cloudru', 'yandex'].includes(saved.provider) ? saved.provider : 'codex',
       model: ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra'].includes(saved.model)
         ? saved.model
         : DEFAULT_CODEX_SETTINGS.model,
       reasoningEffort: ['low', 'medium', 'high'].includes(saved.reasoningEffort)
         ? saved.reasoningEffort
         : DEFAULT_CODEX_SETTINGS.reasoningEffort,
+      claudeModel: ['sonnet', 'opus', 'haiku'].includes(saved.claudeModel)
+        ? saved.claudeModel
+        : DEFAULT_CODEX_SETTINGS.claudeModel,
+      claudeReasoningEffort: ['low', 'medium', 'high'].includes(saved.claudeReasoningEffort)
+        ? saved.claudeReasoningEffort
+        : DEFAULT_CODEX_SETTINGS.claudeReasoningEffort,
       ollamaBaseUrl: typeof saved.ollamaBaseUrl === 'string' && saved.ollamaBaseUrl.trim()
         ? saved.ollamaBaseUrl.trim()
         : DEFAULT_CODEX_SETTINGS.ollamaBaseUrl,
@@ -294,6 +309,10 @@ function syncCodexSettingsUI() {
   ui.codexProviderOptions.hidden = codexSettings.provider !== 'codex';
   ui.codexModel.value = codexSettings.model;
   ui.codexReasoning.value = codexSettings.reasoningEffort;
+  ui.claudeOptions.hidden = codexSettings.provider !== 'claude';
+  ui.claudeModel.value = codexSettings.claudeModel;
+  ui.claudeReasoning.value = codexSettings.claudeReasoningEffort;
+  renderClaudeStatus();
   ui.ollamaOptions.hidden = codexSettings.provider !== 'ollama';
   ui.ollamaBaseUrl.value = codexSettings.ollamaBaseUrl;
   renderOllamaStatus();
@@ -316,9 +335,10 @@ function renderHeaderAiStatus() {
   const icon = makeProviderIcon(codexSettings.provider, 'custom-select-icon');
   ui.headerAiProviderIcon.replaceChildren(...(icon ? [icon] : []));
 
-  const reasoning = codexSettings.provider === 'codex'
-    ? ui.codexReasoning.selectedOptions[0]?.textContent?.trim() || ''
-    : '';
+  const reasoningControl = codexSettings.provider === 'codex'
+    ? ui.codexReasoning
+    : codexSettings.provider === 'claude' ? ui.claudeReasoning : null;
+  const reasoning = reasoningControl?.selectedOptions[0]?.textContent?.trim() || '';
   ui.headerAiReasoning.hidden = !reasoning;
   ui.headerAiReasoning.textContent = reasoning;
 
@@ -1492,6 +1512,82 @@ async function refreshCodexStatus() {
   return codexStatusRequest;
 }
 
+function renderClaudeStatus() {
+  const available = claudeStatus.checked
+    && claudeStatus.installed
+    && claudeStatus.authenticated
+    && !claudeStatus.checking;
+  ui.claudeModel.disabled = !available;
+  ui.claudeReasoning.disabled = !available;
+  if (claudeStatus.checking) {
+    ui.claudeStatus.textContent = 'Проверяем доступность Claude Code…';
+    ui.claudeStatus.dataset.state = 'loading';
+  } else if (!isTauri) {
+    ui.claudeStatus.textContent = 'Claude Code CLI доступен в настольном приложении.';
+    ui.claudeStatus.dataset.state = 'idle';
+  } else if (!claudeStatus.checked) {
+    ui.claudeStatus.textContent = 'Статус Claude Code ещё не проверен.';
+    ui.claudeStatus.dataset.state = 'idle';
+  } else if (claudeStatus.error || !claudeStatus.installed || !claudeStatus.authenticated) {
+    ui.claudeStatus.textContent = claudeStatus.message || 'Проверьте установку и вход в Claude Code CLI.';
+    ui.claudeStatus.dataset.state = 'error';
+  } else {
+    const version = claudeStatus.version ? ` · ${claudeStatus.version}` : '';
+    ui.claudeStatus.textContent = claudeStatus.message || `Claude Code подключён${version}.`;
+    ui.claudeStatus.dataset.state = 'ready';
+  }
+  ui.checkClaudeStatus.disabled = !isTauri || Boolean(claudeStatus.checking);
+  ui.checkClaudeStatus.textContent = claudeStatus.checking ? 'Проверяем…' : 'Проверить';
+  customSelects.refresh();
+}
+
+async function refreshClaudeStatus() {
+  if (claudeStatusRequest) return claudeStatusRequest;
+  if (!isTauri) {
+    claudeStatus = {
+      checked: false,
+      installed: false,
+      authenticated: false,
+      version: '',
+      message: 'Claude Code CLI доступен в настольном приложении.',
+    };
+    renderClaudeStatus();
+    return claudeStatus;
+  }
+
+  claudeStatus = { ...claudeStatus, checking: true, error: false };
+  renderClaudeStatus();
+  claudeStatusRequest = (async () => {
+    try {
+      const result = await invoke('get_claude_status');
+      claudeStatus = {
+        checked: true,
+        installed: result?.installed === true,
+        authenticated: result?.authenticated === true,
+        version: String(result?.version || ''),
+        message: String(result?.message || ''),
+        checking: false,
+        error: false,
+      };
+    } catch (error) {
+      claudeStatus = {
+        checked: true,
+        installed: false,
+        authenticated: false,
+        version: '',
+        message: `Не удалось проверить Claude Code. ${messageFrom(error)}`,
+        checking: false,
+        error: true,
+      };
+    }
+    renderClaudeStatus();
+    return claudeStatus;
+  })().finally(() => {
+    claudeStatusRequest = null;
+  });
+  return claudeStatusRequest;
+}
+
 function renderOllamaStatus() {
   const models = ollamaStatus.models;
   const addressConnected = ollamaStatus.checked && ollamaStatus.available && !ollamaStatus.checking;
@@ -1886,6 +1982,7 @@ function refreshSelectedAiProviderStatus() {
   if (codexSettings.provider === 'ollama') return refreshOllamaStatus();
   if (codexSettings.provider === 'cloudru') return refreshCloudRuStatus();
   if (codexSettings.provider === 'yandex') return refreshYandexStatus();
+  if (codexSettings.provider === 'claude') return refreshClaudeStatus();
   return refreshCodexStatus();
 }
 
@@ -2583,6 +2680,7 @@ function openAiReviewResults() {
 function aiProviderLabel(provider) {
   switch (String(provider || '').toLocaleLowerCase()) {
     case 'ollama': return 'Ollama';
+    case 'claude': return 'Claude Code';
     case 'cloudru': return 'Cloud.ru';
     case 'yandex': return 'Yandex AI Studio';
     default: return 'ChatGPT (Codex)';
@@ -2976,7 +3074,8 @@ async function executeAiReview(tab, token, parallelProcesses) {
   const status = provider === 'ollama'
     ? await refreshOllamaStatus()
     : provider === 'cloudru' ? await refreshCloudRuStatus()
-      : provider === 'yandex' ? await refreshYandexStatus() : await refreshCodexStatus();
+      : provider === 'yandex' ? await refreshYandexStatus()
+        : provider === 'claude' ? await refreshClaudeStatus() : await refreshCodexStatus();
   if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
   if (!codexSettings.enabled) {
     tab.aiAnalysis = 'idle';
@@ -2984,6 +3083,9 @@ async function executeAiReview(tab, token, parallelProcesses) {
     return;
   }
   const codexAvailable = codexPayloadIsAvailable(status);
+  const claudeAvailable = status?.checked === true
+    && status.installed === true
+    && status.authenticated === true;
   const ollamaAvailable = status?.checked === true
     && status.available === true
     && status.models.includes(codexSettings.ollamaModel);
@@ -2994,6 +3096,7 @@ async function executeAiReview(tab, token, parallelProcesses) {
     && status.available === true
     && status.models.includes(codexSettings.yandexModel);
   if ((provider === 'codex' && !codexAvailable)
+    || (provider === 'claude' && !claudeAvailable)
     || (provider === 'ollama' && !ollamaAvailable)
     || (provider === 'cloudru' && !cloudRuAvailable)
     || (provider === 'yandex' && !yandexAvailable)) {
@@ -3004,6 +3107,10 @@ async function executeAiReview(tab, token, parallelProcesses) {
         ? 'Проверьте API-ключ и модель Cloud.ru. Локальные результаты сохранены.'
         : provider === 'yandex'
           ? 'Проверьте API-ключ, ID каталога и модель Yandex AI Studio. Локальные результаты сохранены.'
+          : provider === 'claude'
+            ? !status.installed
+              ? 'Claude Code CLI не найден. Локальные результаты сохранены.'
+              : 'Войдите в Claude Code CLI. Локальные результаты сохранены.'
           : !status.installed
             ? 'Codex CLI не найден. Локальные результаты сохранены.'
             : 'Войдите в Codex CLI. Локальные результаты сохранены.');
@@ -3054,6 +3161,14 @@ async function executeAiReview(tab, token, parallelProcesses) {
             model: codexSettings.yandexModel,
             parallelProcesses,
           }
+          : provider === 'claude'
+            ? {
+              text: tab.document.text,
+              findings: tab.findings,
+              model: codexSettings.claudeModel,
+              reasoningEffort: codexSettings.claudeReasoningEffort,
+              parallelProcesses,
+            }
           : {
             text: tab.document.text,
             findings: tab.findings,
@@ -3071,7 +3186,8 @@ async function executeAiReview(tab, token, parallelProcesses) {
       }
       const command = provider === 'ollama' ? 'analyze_with_ollama'
         : provider === 'cloudru' ? 'analyze_with_cloudru'
-          : provider === 'yandex' ? 'analyze_with_yandex' : 'analyze_with_codex';
+          : provider === 'yandex' ? 'analyze_with_yandex'
+            : provider === 'claude' ? 'analyze_with_claude' : 'analyze_with_codex';
       result = await invoke(command, input);
     } else {
       if (provider !== 'codex') throw new Error(`Проверка ${providerLabel} доступна только в настольном приложении.`);
@@ -3540,6 +3656,7 @@ ui.aiReviewDialog.addEventListener('click', (event) => {
   if (event.target === ui.aiReviewDialog) ui.aiReviewDialog.close();
 });
 ui.checkCodexStatus.addEventListener('click', () => void refreshCodexStatus());
+ui.checkClaudeStatus.addEventListener('click', () => void refreshClaudeStatus());
 ui.checkOllamaStatus.addEventListener('click', () => void refreshOllamaStatus());
 ui.ollamaBaseUrl.addEventListener('input', () => {
   ollamaStatusRequestId += 1;
@@ -3592,7 +3709,7 @@ ui.settingsDialog.addEventListener('change', (event) => {
     render();
   }
   if (event.target === ui.codexProvider) {
-    codexSettings.provider = ['ollama', 'cloudru', 'yandex'].includes(ui.codexProvider.value) ? ui.codexProvider.value : 'codex';
+    codexSettings.provider = ['claude', 'ollama', 'cloudru', 'yandex'].includes(ui.codexProvider.value) ? ui.codexProvider.value : 'codex';
     saveCodexSettings();
     syncCodexSettingsUI();
     if (codexSettings.provider === 'ollama') void prepareOllamaSettings();
@@ -3619,6 +3736,11 @@ ui.settingsDialog.addEventListener('change', (event) => {
   }
   if (event.target === ui.yandexModel) codexSettings.yandexModel = ui.yandexModel.value;
   if (event.target === ui.codexModel) codexSettings.model = ui.codexModel.value;
+  if (event.target === ui.claudeModel) codexSettings.claudeModel = ui.claudeModel.value;
+  if (event.target === ui.claudeReasoning) {
+    codexSettings.claudeReasoningEffort = ui.claudeReasoning.value;
+    renderHeaderAiStatus();
+  }
   if (event.target === ui.codexReasoning) {
     codexSettings.reasoningEffort = ui.codexReasoning.value;
     renderHeaderAiStatus();
@@ -3627,7 +3749,7 @@ ui.settingsDialog.addEventListener('change', (event) => {
     const selected = Number(ui.parallelProcesses.value);
     codexSettings.parallelProcesses = [1, 2, 3, 4].includes(selected) ? selected : 1;
   }
-  if ([ui.codexEnabled, ui.codexProvider, ui.ollamaBaseUrl, ui.ollamaModel, ui.cloudRuModel, ui.yandexModel, ui.codexModel, ui.codexReasoning, ui.parallelProcesses].includes(event.target)) {
+  if ([ui.codexEnabled, ui.codexProvider, ui.ollamaBaseUrl, ui.ollamaModel, ui.cloudRuModel, ui.yandexModel, ui.codexModel, ui.codexReasoning, ui.claudeModel, ui.claudeReasoning, ui.parallelProcesses].includes(event.target)) {
     saveCodexSettings();
   }
   if (event.target === ui.codexEnabled && codexSettings.enabled) {

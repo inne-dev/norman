@@ -1,4 +1,5 @@
 const PROVIDER_ICONS = {
+  claude: '/provider-logos/claude.svg',
   ollama: '/provider-logos/ollama.svg',
   cloudru: '/provider-logos/cloudru.svg',
   yandex: '/provider-logos/yandex.svg',

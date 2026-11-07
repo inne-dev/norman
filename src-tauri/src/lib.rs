@@ -409,6 +409,8 @@ pub fn run() {
             get_system_memory_bytes,
             codex::get_codex_status,
             codex::analyze_with_codex,
+            codex::get_claude_status,
+            codex::analyze_with_claude,
             codex::get_ollama_status,
             codex::analyze_with_ollama,
             codex::pull_ollama_model,

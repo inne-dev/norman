@@ -11,7 +11,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(windows)]
@@ -43,9 +43,11 @@ const TEMP_OLLAMA_DIAG_MAX_BYTES: u64 = 16 * 1024;
 static TEMP_OLLAMA_DIAG_LOCK: Mutex<()> = Mutex::new(());
 const PER_RUN_TIMEOUT: Duration = Duration::from_secs(75);
 const CODEX_TOTAL_CALL_TIMEOUT: Duration = Duration::from_secs(150);
+const CLAUDE_TOTAL_CALL_TIMEOUT: Duration = Duration::from_secs(150);
 const TOTAL_RUN_TIMEOUT: Duration = Duration::from_secs(8 * 60);
 const CODEX_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(75);
 const CODEX_RESULT_FILENAME: &str = "codex-result.json";
+const CLAUDE_MAX_SCHEMA_BYTES: usize = 128 * 1024;
 const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const OLLAMA_PER_RUN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const OLLAMA_TOTAL_RUN_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -72,6 +74,7 @@ const CONFIDENCE_VALUES: [&str; 4] = ["likely_false", "low", "medium", "high"];
 const POSSIBLE_SIGNAL_CONFIDENCE_VALUES: [&str; 3] = ["low", "medium", "high"];
 const GENERIC_AI_RULE_ID: &str = "AE-AI-01";
 const ALLOWED_MODELS: [&str; 3] = ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"];
+const CLAUDE_MODELS: [&str; 3] = ["sonnet", "opus", "haiku"];
 const ALLOWED_EFFORTS: [&str; 3] = ["low", "medium", "high"];
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -79,6 +82,15 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct CodexStatus {
+    installed: bool,
+    authenticated: bool,
+    version: Option<String>,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ClaudeStatus {
     installed: bool,
     authenticated: bool,
     version: Option<String>,
@@ -113,6 +125,7 @@ pub(super) struct YandexStatus {
 #[derive(Clone)]
 enum AiProvider {
     Codex,
+    ClaudeCode,
     Ollama {
         base_url: Url,
         client: reqwest::blocking::Client,
@@ -262,6 +275,18 @@ pub(super) async fn get_codex_status() -> CodexStatus {
 }
 
 #[tauri::command]
+pub(super) async fn get_claude_status() -> ClaudeStatus {
+    tokio::task::spawn_blocking(detect_claude_status)
+        .await
+        .unwrap_or_else(|_| ClaudeStatus {
+            installed: false,
+            authenticated: false,
+            version: None,
+            message: "Не удалось проверить Claude Code CLI.".into(),
+        })
+}
+
+#[tauri::command]
 pub(super) async fn analyze_with_codex(
     app: tauri::AppHandle,
     analysis_id: String,
@@ -289,6 +314,36 @@ pub(super) async fn analyze_with_codex(
     })
     .await
     .map_err(|_| "Обработка Codex CLI была прервана.".to_string())?
+}
+
+#[tauri::command]
+pub(super) async fn analyze_with_claude(
+    app: tauri::AppHandle,
+    analysis_id: String,
+    text: String,
+    findings: Vec<Finding>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    parallel_processes: Option<Value>,
+) -> Result<Vec<Finding>, String> {
+    let parallel_processes = normalize_parallel_processes(parallel_processes);
+    let control = super::analysis_pause_control(&app, &analysis_id)?;
+    let worker_analysis_id = analysis_id.clone();
+    tokio::task::spawn_blocking(move || {
+        analyze_with_ai_inner(
+            &app,
+            &control,
+            &worker_analysis_id,
+            &text,
+            findings,
+            model,
+            Some(reasoning_effort.unwrap_or_else(|| "high".into())),
+            parallel_processes,
+            AiProvider::ClaudeCode,
+        )
+    })
+    .await
+    .map_err(|_| "Обработка Claude Code CLI была прервана.".to_string())?
 }
 
 #[tauri::command]
@@ -518,6 +573,71 @@ fn detect_codex_status() -> CodexStatus {
     }
 }
 
+fn detect_claude_status() -> ClaudeStatus {
+    let probe_dir = match PrivateTempDir::new() {
+        Ok(dir) => dir,
+        Err(_) => {
+            return ClaudeStatus {
+                installed: false,
+                authenticated: false,
+                version: None,
+                message: "Не удалось проверить Claude Code CLI.".into(),
+            };
+        }
+    };
+
+    let version_args = ["--version".into()];
+    let version_output = match run_process_for(
+        "claude",
+        &version_args,
+        &probe_dir.path,
+        None,
+        STATUS_TIMEOUT,
+        512,
+    ) {
+        Ok(output)
+            if !output.timed_out && output.status.success() && !output.stdout_overflow =>
+        {
+            output
+        }
+        _ => {
+            return ClaudeStatus {
+                installed: false,
+                authenticated: false,
+                version: None,
+                message: "Claude Code CLI не установлен или недоступен в PATH.".into(),
+            };
+        }
+    };
+    let version = String::from_utf8_lossy(&version_output.stdout)
+        .trim()
+        .chars()
+        .take(100)
+        .collect::<String>();
+
+    let auth_args = ["auth".into(), "status".into()];
+    let authenticated = run_process_for(
+        "claude",
+        &auth_args,
+        &probe_dir.path,
+        None,
+        STATUS_TIMEOUT,
+        4096,
+    )
+    .is_ok_and(|output| !output.timed_out && output.status.success());
+
+    ClaudeStatus {
+        installed: true,
+        authenticated,
+        version: (!version.is_empty()).then_some(version),
+        message: if authenticated {
+            "Claude Code CLI готов.".into()
+        } else {
+            "Войдите в Claude Code CLI, чтобы использовать AI-анализ.".into()
+        },
+    }
+}
+
 fn analyze_with_ai_inner(
     app: &tauri::AppHandle,
     control: &super::AnalysisPauseControl,
@@ -534,6 +654,15 @@ fn analyze_with_ai_inner(
     let (model, reasoning_effort) = match &provider {
         AiProvider::Codex => (
             validate_choice(model, "gpt-6-luna", &ALLOWED_MODELS, "модель")?,
+            Some(validate_choice(
+                reasoning_effort,
+                "high",
+                &ALLOWED_EFFORTS,
+                "уровень рассуждения",
+            )?),
+        ),
+        AiProvider::ClaudeCode => (
+            validate_choice(model, "sonnet", &CLAUDE_MODELS, "модель Claude Code")?,
             Some(validate_choice(
                 reasoning_effort,
                 "high",
@@ -592,6 +721,7 @@ fn analyze_with_ai_inner(
     };
     let provider_name = match &provider {
         AiProvider::Codex => "Codex",
+        AiProvider::ClaudeCode => "Claude Code",
         AiProvider::Ollama { .. } => "Ollama",
         AiProvider::Cloudru { .. } => "Cloud.ru",
         AiProvider::Yandex { .. } => "Yandex AI Studio",
@@ -618,6 +748,11 @@ fn analyze_with_ai_inner(
 
     if matches!(&provider, AiProvider::Codex) {
         let status = detect_codex_status();
+        if !status.installed || !status.authenticated {
+            return Err(status.message);
+        }
+    } else if matches!(&provider, AiProvider::ClaudeCode) {
+        let status = detect_claude_status();
         if !status.installed || !status.authenticated {
             return Err(status.message);
         }
@@ -669,7 +804,10 @@ fn analyze_with_ai_inner(
     let deadline = Instant::now()
         + match &provider {
             AiProvider::Ollama { .. } => OLLAMA_TOTAL_RUN_TIMEOUT,
-            AiProvider::Codex | AiProvider::Cloudru { .. } | AiProvider::Yandex { .. } => TOTAL_RUN_TIMEOUT,
+            AiProvider::Codex
+            | AiProvider::ClaudeCode
+            | AiProvider::Cloudru { .. }
+            | AiProvider::Yandex { .. } => TOTAL_RUN_TIMEOUT,
         };
     let verify_schema = verification_schema();
     let verify_schema_path = "verify-schema.json";
@@ -1390,12 +1528,21 @@ fn run_structured_prompt<T: for<'de> Deserialize<'de>>(
     }
     let provider_timeout = match provider {
         AiProvider::Codex => CODEX_TOTAL_CALL_TIMEOUT,
+        AiProvider::ClaudeCode => CLAUDE_TOTAL_CALL_TIMEOUT,
         AiProvider::Cloudru { .. } | AiProvider::Yandex { .. } => PER_RUN_TIMEOUT,
         AiProvider::Ollama { .. } => OLLAMA_PER_RUN_TIMEOUT,
     };
     let timeout = provider_timeout.min(remaining);
     match provider {
         AiProvider::Codex => run_codex_structured_prompt(
+            prompt,
+            schema_path,
+            working_dir,
+            model,
+            reasoning_effort.unwrap_or("high"),
+            timeout,
+        ),
+        AiProvider::ClaudeCode => run_claude_structured_prompt(
             prompt,
             schema_path,
             working_dir,
@@ -1513,6 +1660,164 @@ fn run_codex_structured_prompt<T: for<'de> Deserialize<'de>>(
         return Err(codex_process_error(&resumed));
     }
     read_codex_result(&result_path)
+}
+
+fn run_claude_structured_prompt<T: for<'de> Deserialize<'de>>(
+    prompt: &str,
+    schema_path: &str,
+    working_dir: &Path,
+    model: &str,
+    reasoning_effort: &str,
+    timeout: Duration,
+) -> Result<T, String> {
+    let schema_bytes = fs::read(working_dir.join(schema_path))
+        .map_err(|_| "Не удалось прочитать временную JSON-схему для Claude Code.".to_string())?;
+    if schema_bytes.len() > CLAUDE_MAX_SCHEMA_BYTES {
+        return Err("JSON-схема для Claude Code превышает допустимый размер.".into());
+    }
+    let schema = String::from_utf8(schema_bytes)
+        .map_err(|_| "JSON-схема для Claude Code имеет неверную кодировку.".to_string())?;
+    let session_id = new_claude_session_id();
+    let started = Instant::now();
+    let first_timeout = timeout.min(CODEX_ATTEMPT_TIMEOUT);
+    let first_args = claude_exec_args(None, &session_id, &schema, model, reasoning_effort);
+    let first = run_process_for(
+        "claude",
+        &first_args,
+        working_dir,
+        Some(prompt),
+        first_timeout,
+        MAX_RESPONSE_BYTES,
+    )?;
+    if !first.timed_out {
+        if !first.status.success() {
+            return Err(claude_process_error(&first));
+        }
+        return read_claude_result(&first.stdout, first.stdout_overflow);
+    }
+    if let Ok(result) = read_claude_result(&first.stdout, first.stdout_overflow) {
+        return Ok(result);
+    }
+
+    let resume_timeout = timeout
+        .saturating_sub(started.elapsed())
+        .min(CODEX_ATTEMPT_TIMEOUT);
+    if resume_timeout.is_zero() {
+        return Err("Claude Code превысил общий лимит времени запроса.".into());
+    }
+    let resume_args = claude_exec_args(
+        Some(&session_id),
+        &session_id,
+        &schema,
+        model,
+        reasoning_effort,
+    );
+    let continuation = "Продолжи незавершённый анализ в этой сессии. Используй ранее полученный контекст. Верни полный итог по подключённой JSON-схеме, без пояснений.";
+    let resumed = run_process_for(
+        "claude",
+        &resume_args,
+        working_dir,
+        Some(continuation),
+        resume_timeout,
+        MAX_RESPONSE_BYTES,
+    )?;
+    if resumed.stdout_overflow {
+        return Err("Вывод Claude Code превышает допустимый лимит размера.".into());
+    }
+    if resumed.timed_out {
+        return Err("Claude Code превысил общий лимит времени запроса, включая продолжение.".into());
+    }
+    if !resumed.status.success() {
+        return Err(claude_process_error(&resumed));
+    }
+    read_claude_result(&resumed.stdout, resumed.stdout_overflow)
+}
+
+fn claude_exec_args(
+    resume_session_id: Option<&str>,
+    session_id: &str,
+    schema: &str,
+    model: &str,
+    reasoning_effort: &str,
+) -> Vec<OsString> {
+    let mut args = vec!["-p".into()];
+    if let Some(resume_session_id) = resume_session_id {
+        args.extend(["--resume".into(), resume_session_id.into()]);
+    } else {
+        args.extend(["--session-id".into(), session_id.into()]);
+    }
+    args.extend([
+        "--output-format".into(),
+        "json".into(),
+        "--json-schema".into(),
+        schema.into(),
+        "--model".into(),
+        model.into(),
+        "--effort".into(),
+        reasoning_effort.into(),
+        "--safe-mode".into(),
+        "--strict-mcp-config".into(),
+        "--mcp-config".into(),
+        "{}".into(),
+        "--tools".into(),
+        "".into(),
+        "--disallowedTools".into(),
+        "mcp__*".into(),
+    ]);
+    args
+}
+
+fn new_claude_session_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
+    let seed = timestamp ^ ((std::process::id() as u128) << 64) ^ counter;
+    let mut bytes = seed.to_be_bytes();
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+fn read_claude_result<T: for<'de> Deserialize<'de>>(
+    output: &[u8],
+    overflow: bool,
+) -> Result<T, String> {
+    if overflow {
+        return Err("Вывод Claude Code превышает допустимый лимит размера.".into());
+    }
+    let response: Value = serde_json::from_slice(output)
+        .map_err(|_| "Claude Code вернул ответ в неверном формате.".to_string())?;
+    let structured_output = response
+        .get("structured_output")
+        .cloned()
+        .ok_or_else(|| {
+            "Claude Code не вернул структурированный ответ по заданной схеме.".to_string()
+        })?;
+    serde_json::from_value(structured_output)
+        .map_err(|_| "Claude Code вернул ответ, не соответствующий JSON-схеме.".into())
+}
+
+fn claude_process_error(output: &CapturedOutput) -> String {
+    if output.stderr_overflow {
+        return "Вывод ошибок Claude Code превышает допустимый лимит размера.".into();
+    }
+    format!(
+        "Claude Code CLI завершился с ошибкой (код {}). Проверьте вход CLI и подключение.",
+        output.status.code().map_or_else(|| "signal".into(), |code| code.to_string())
+    )
 }
 
 fn codex_exec_args(
@@ -2537,6 +2842,7 @@ impl AiProvider {
     fn name(&self) -> &'static str {
         match self {
             Self::Codex => "Codex",
+            Self::ClaudeCode => "Claude Code",
             Self::Ollama { .. } => "Ollama",
             Self::Cloudru { .. } => "Cloud.ru",
             Self::Yandex { .. } => "Yandex AI Studio",
@@ -2551,21 +2857,32 @@ fn run_process(
     timeout: Duration,
     output_limit: usize,
 ) -> Result<CapturedOutput, String> {
-    let mut child = build_codex_command(args, working_dir)?
+    run_process_for("codex", args, working_dir, input, timeout, output_limit)
+}
+
+fn run_process_for(
+    cli_name: &str,
+    args: &[std::ffi::OsString],
+    working_dir: &Path,
+    input: Option<&str>,
+    timeout: Duration,
+    output_limit: usize,
+) -> Result<CapturedOutput, String> {
+    let mut child = build_cli_command(cli_name, args, working_dir)?
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|_| "Не удалось запустить Codex CLI.".to_string())?;
+        .map_err(|_| format!("Не удалось запустить {cli_name} CLI."))?;
 
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "Не удалось прочитать вывод Codex CLI.".to_string())?;
+        .ok_or_else(|| format!("Не удалось прочитать вывод {cli_name} CLI."))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| "Не удалось прочитать ошибки Codex CLI.".to_string())?;
+        .ok_or_else(|| format!("Не удалось прочитать ошибки {cli_name} CLI."))?;
     let stdout_reader = thread::spawn(move || read_bounded(stdout, output_limit));
     let stderr_reader = thread::spawn(move || read_bounded(stderr, output_limit));
     let stdin = child.stdin.take();
@@ -2594,12 +2911,12 @@ fn run_process(
                 terminate_child_tree(&mut child);
                 break child
                     .wait()
-                    .map_err(|_| "Не удалось остановить Codex CLI по тайм-ауту.".to_string())?;
+                    .map_err(|_| format!("Не удалось остановить {cli_name} CLI по тайм-ауту."))?;
             }
             Err(_) => {
                 terminate_child_tree(&mut child);
                 let _ = child.wait();
-                return Err("Не удалось проверить состояние процесса Codex CLI.".into());
+                return Err(format!("Не удалось проверить состояние процесса {cli_name} CLI."));
             }
         }
     };
@@ -2608,10 +2925,10 @@ fn run_process(
     }
     let stdout = stdout_reader
         .join()
-        .map_err(|_| "Не удалось прочитать вывод Codex CLI.".to_string())?;
+        .map_err(|_| format!("Не удалось прочитать вывод {cli_name} CLI."))?;
     let stderr = stderr_reader
         .join()
-        .map_err(|_| "Не удалось прочитать ошибки Codex CLI.".to_string())?;
+        .map_err(|_| format!("Не удалось прочитать ошибки {cli_name} CLI."))?;
     Ok(CapturedOutput {
         status,
         stdout: stdout.bytes,
@@ -2622,18 +2939,54 @@ fn run_process(
 }
 
 fn build_codex_command(args: &[OsString], working_dir: &Path) -> Result<Command, String> {
-    let executable = find_codex_executable().unwrap_or_else(|| PathBuf::from("codex"));
+    build_cli_command("codex", args, working_dir)
+}
+
+fn build_cli_command(
+    cli_name: &str,
+    args: &[OsString],
+    working_dir: &Path,
+) -> Result<Command, String> {
+    let executable = if cli_name == "codex" {
+        find_codex_executable()
+    } else {
+        find_cli_executable(cli_name)
+    }
+    .unwrap_or_else(|| PathBuf::from(cli_name));
     #[cfg(windows)]
     if executable
         .extension()
         .and_then(OsStr::to_str)
         .is_some_and(|extension| extension.eq_ignore_ascii_case("cmd"))
     {
+        if cli_name == "claude" {
+            let script = executable
+                .parent()
+                .map(|directory| directory.join("node_modules/@anthropic-ai/claude-code/cli.js"))
+                .and_then(|path| path.canonicalize().ok())
+                .ok_or_else(|| "Не удалось найти модуль Claude Code рядом с CLI.".to_string())?;
+            let node = find_cli_binary("node")
+                .ok_or_else(|| "Для запуска Claude Code CLI не найден Node.js.".to_string())?;
+            let path = env::join_paths(codex_search_directories())
+                .map_err(|_| "Не удалось подготовить PATH для Claude Code CLI.".to_string())?;
+            let mut command = Command::new(node);
+            command
+                .arg(script)
+                .args(args)
+                .current_dir(working_dir)
+                .env("PATH", path);
+            return Ok(command);
+        }
+
         let arguments = args
             .iter()
             .map(|argument| cmd_safe_argument(argument.as_os_str()))
             .collect::<Result<Vec<_>, _>>()?;
-        let command_line = format!("call codex.cmd {}", arguments.join(" "));
+        let executable_name = executable
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("cli.cmd");
+        let command_line = format!("call {executable_name} {}", arguments.join(" "));
         let mut command = Command::new(cmd_interpreter());
         command
             .args(["/D", "/S", "/C"])
@@ -2643,18 +2996,18 @@ fn build_codex_command(args: &[OsString], working_dir: &Path) -> Result<Command,
         let mut search_paths = vec![
             executable
                 .parent()
-                .ok_or_else(|| "Codex CLI path is invalid.".to_string())?
+                .ok_or_else(|| format!("{cli_name} CLI path is invalid."))?
                 .to_path_buf(),
         ];
         search_paths.extend(codex_search_directories());
         let path = env::join_paths(search_paths)
-            .map_err(|_| "Не удалось подготовить PATH для Codex CLI.".to_string())?;
+            .map_err(|_| format!("Не удалось подготовить PATH для {cli_name} CLI."))?;
         command.env("PATH", path);
         return Ok(command);
     }
 
     let path = env::join_paths(codex_search_directories())
-        .map_err(|_| "Не удалось подготовить PATH для Codex CLI.".to_string())?;
+        .map_err(|_| format!("Не удалось подготовить PATH для {cli_name} CLI."))?;
     let mut command = Command::new(executable);
     command
         .args(args)
@@ -2712,22 +3065,36 @@ fn terminate_child_tree(child: &mut Child) {
 }
 
 fn find_codex_executable() -> Option<PathBuf> {
-    let directories = codex_search_directories();
-    let binary_names: &[&str] = if cfg!(windows) { &["codex.exe"] } else { &["codex"] };
-    let binary = directories
-        .iter()
-        .flat_map(|directory| binary_names.iter().map(move |name| directory.join(name)))
-        .find_map(|candidate| candidate.canonicalize().ok());
+    find_cli_executable("codex")
+}
+
+fn find_cli_executable(cli_name: &str) -> Option<PathBuf> {
+    let binary = find_cli_binary(cli_name);
     #[cfg(windows)]
     {
+        let directories = codex_search_directories();
         return binary.or_else(|| {
             directories
                 .into_iter()
-                .map(|directory| directory.join("codex.cmd"))
+                .map(|directory| directory.join(format!("{cli_name}.cmd")))
                 .find_map(|candidate| candidate.canonicalize().ok())
         });
     }
     #[cfg(not(windows))]
+    binary
+}
+
+fn find_cli_binary(cli_name: &str) -> Option<PathBuf> {
+    let directories = codex_search_directories();
+    let executable_name = if cfg!(windows) {
+        format!("{cli_name}.exe")
+    } else {
+        cli_name.to_string()
+    };
+    let binary = directories
+        .iter()
+        .map(|directory| directory.join(&executable_name))
+        .find_map(|candidate| candidate.canonicalize().ok());
     binary
 }
 
