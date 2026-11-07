@@ -1146,7 +1146,7 @@ main {
   accent-color: var(--accent);
 }
 
-.codex-privacy-note {
+.codex-description {
   margin: -7px 0 1px 24px;
   color: var(--muted);
   font-size: 11px;
