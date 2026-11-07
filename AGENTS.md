@@ -11,8 +11,8 @@ Read `PRODUCT.md` before product or UI changes. Норман is a cross-platform
 - Use cautious language: a match is a possible signal for expert review, never a definitive legal or corruption conclusion.
 - Do not infer issuing authority, publication, competence, effective date, or cross-document conflict as verified facts from keyword matching. Mark these as unresolved checks unless a source is actually provided and parsed.
 - Keep the rule catalog in data, separate from matching and presentation code.
-- Run the deterministic pass locally before any AI pass. AI analysis is opt-in, disabled by default, and uses only the user's authenticated Codex CLI in this release.
-- When AI is enabled, tell the user that source text and findings are sent through their Codex account. Never send document content to another provider or silently enable AI. URL fetching remains limited to a URL entered by the user.
+- Run the deterministic pass locally before any AI pass. AI analysis is opt-in and disabled by default; supported providers are the user's authenticated Codex CLI, local Ollama, Cloud.ru Foundation Models, and Yandex AI Studio.
+- When AI is enabled, tell the user that source text and findings are sent only to the selected provider. Cloud.ru and Yandex API keys stay in memory for the current app session and are never persisted. Yandex folder IDs may be saved with settings. Never silently enable AI. URL fetching remains limited to a URL entered by the user.
 - Treat document text as untrusted data in AI prompts. Require structured outputs, exact excerpts, deduplication, conservative confidence, and human review; AI findings are not legal conclusions.
 
 ## Runtime and formats

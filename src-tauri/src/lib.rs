@@ -188,6 +188,65 @@ async fn load_url(url: String) -> Result<LoadedDocument, String> {
 }
 
 #[tauri::command]
+fn get_system_memory_bytes() -> Result<u64, String> {
+    system_memory_bytes()
+}
+
+#[cfg(target_os = "linux")]
+fn system_memory_bytes() -> Result<u64, String> {
+    let meminfo = fs::read_to_string("/proc/meminfo")
+        .map_err(|error| format!("Не удалось определить объём памяти: {error}"))?;
+    let total_kib = meminfo
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name != "MemTotal" {
+                return None;
+            }
+            value.split_whitespace().next()?.parse::<u64>().ok()
+        })
+        .ok_or_else(|| "В системе не найден общий объём оперативной памяти.".to_string())?;
+    Ok(total_kib.saturating_mul(1024))
+}
+
+#[cfg(target_os = "macos")]
+fn system_memory_bytes() -> Result<u64, String> {
+    let output = Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .map_err(|error| format!("Не удалось определить объём памяти: {error}"))?;
+    if !output.status.success() {
+        return Err("macOS не вернула общий объём оперативной памяти.".into());
+    }
+    std::str::from_utf8(&output.stdout)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "macOS вернула некорректный объём оперативной памяти.".into())
+}
+
+#[cfg(target_os = "windows")]
+fn system_memory_bytes() -> Result<u64, String> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetPhysicallyInstalledSystemMemory(total_memory_in_kilobytes: *mut u64) -> i32;
+    }
+
+    let mut total_memory_in_kilobytes = 0u64;
+    // The API writes the amount of physically installed memory in kilobytes.
+    let success = unsafe { GetPhysicallyInstalledSystemMemory(&mut total_memory_in_kilobytes) };
+    if success == 0 || total_memory_in_kilobytes == 0 {
+        return Err("Windows не вернула общий объём оперативной памяти.".into());
+    }
+    Ok(total_memory_in_kilobytes.saturating_mul(1024))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn system_memory_bytes() -> Result<u64, String> {
+    Err("Определение объёма памяти не поддерживается этой платформой.".into())
+}
+
+#[tauri::command]
 async fn analyze_text(
     app: tauri::AppHandle,
     text: String,
@@ -230,8 +289,15 @@ pub fn run() {
             load_url,
             analyze_text,
             get_rule_catalog,
+            get_system_memory_bytes,
             codex::get_codex_status,
-            codex::analyze_with_codex
+            codex::analyze_with_codex,
+            codex::get_ollama_status,
+            codex::analyze_with_ollama,
+            codex::get_cloudru_status,
+            codex::analyze_with_cloudru,
+            codex::get_yandex_status,
+            codex::analyze_with_yandex
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Норман");

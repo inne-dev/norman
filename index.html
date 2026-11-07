@@ -8,7 +8,7 @@
       name="description"
       content="Локальная первичная проверка нормативных актов и поиск точных фрагментов для экспертного анализа."
     />
-    <title>Норман — проверка нормативных актов</title>
+    <title>Норман АЭ — проверка нормативных актов</title>
   </head>
   <body>
     <div id="app" class="app-shell">
@@ -28,6 +28,12 @@
           </button>
         </header>
 
+        <button class="app-info-button" id="openAppInfo" type="button" aria-label="О программе" title="О программе">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 11v5M12 7h.01" />
+          </svg>
+        </button>
         <button class="settings-button" id="openSettings" type="button" aria-label="Настройки" title="Настройки">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M21 4h-7M10 4H3m18 8h-9m-4 0H3m18 8h-5m-4 0H3" />
@@ -64,6 +70,27 @@
           </div>
         </div>
       </main>
+
+      <dialog class="modal welcome-modal" id="welcomeDialog" aria-labelledby="welcomeTitle" aria-describedby="welcomeDescription">
+        <div class="modal-card">
+          <button class="modal-close welcome-close" id="closeWelcome" type="button" aria-label="Закрыть приветствие">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
+          </button>
+          <img class="welcome-star" src="/welcome/star-mascot.png" alt="Звёздочка Нормана" />
+          <h2 id="welcomeTitle">Добро пожаловать в Норман</h2>
+          <p id="welcomeDescription">Для наиболее полного разбора найденных сигналов можно включить дополнительную проверку с помощью ИИ. Провайдера и модель можно выбрать в настройках.</p>
+          <p class="welcome-privacy">ИИ-проверка выключена по умолчанию. Документ будет отправляться только выбранному вами провайдеру после включения этой функции.</p>
+          <section class="welcome-ollama" id="welcomeOllama" aria-labelledby="welcomeOllamaTitle" hidden>
+            <h3 id="welcomeOllamaTitle">Локальная модель может подойти вашему компьютеру</h3>
+            <p id="welcomeMemory" hidden></p>
+            <p>Ollama — приложение для запуска ИИ-моделей на компьютере. При подключении к локальной Ollama вычисления и текст документа остаются на устройстве. Требования к памяти зависят от модели и графического процессора.</p>
+          </section>
+          <div class="welcome-actions">
+            <button class="button button-secondary" id="continueWithoutAi" type="button">Продолжить без ИИ</button>
+            <button class="button button-primary" id="welcomeOpenSettings" type="button">Настроить ИИ</button>
+          </div>
+        </div>
+      </dialog>
 
       <dialog class="modal" id="urlDialog" aria-labelledby="urlDialogTitle">
         <form class="modal-card" id="urlForm">
@@ -128,7 +155,7 @@
           </fieldset>
           <section class="settings-group settings-analysis" aria-labelledby="analysisSettingsTitle">
             <h3 id="analysisSettingsTitle">Анализ</h3>
-            <label class="codex-field" for="parallelProcesses">
+            <div class="codex-field">
               <span>Количество параллельных процессов</span>
               <select class="modal-input codex-select" id="parallelProcesses">
                 <option value="1">1</option>
@@ -136,7 +163,7 @@
                 <option value="3">3</option>
                 <option value="4">4</option>
               </select>
-            </label>
+            </div>
           </section>
           <section class="settings-group settings-preview" aria-labelledby="previewSettingsTitle">
             <h3 id="previewSettingsTitle">Превью страницы</h3>
@@ -154,35 +181,107 @@
             </label>
             <p class="codex-privacy-note">При включении текст документа и найденные сигналы будут передаваться выбранному провайдеру.</p>
             <div class="codex-options" id="codexOptions" hidden>
-              <label class="codex-field" for="codexProvider">
+              <div class="codex-field">
                 <span>Провайдер</span>
                 <select class="modal-input codex-select" id="codexProvider">
                   <option value="codex">ChatGPT (Codex)</option>
+                  <option value="ollama">Ollama</option>
+                  <option value="cloudru">Cloud.ru Foundation Models</option>
+                  <option value="yandex">Yandex AI Studio</option>
                 </select>
-              </label>
-              <label class="codex-field" for="codexModel">
-                <span>Модель</span>
-                <select class="modal-input codex-select" id="codexModel">
-                  <option value="gpt-6-luna">gpt-6-luna</option>
-                  <option value="gpt-6.1-sol">gpt-6.1-sol</option>
-                  <option value="gpt-6-astra">gpt-6-astra</option>
-                </select>
-              </label>
-              <label class="codex-field" for="codexReasoning">
-                <span>Уровень рассуждения</span>
-                <select class="modal-input codex-select" id="codexReasoning">
-                  <option value="low">Низкое</option>
-                  <option value="medium">Среднее</option>
-                  <option value="high">Высокое</option>
-                </select>
-              </label>
+              </div>
+              <div class="codex-provider-options" id="codexProviderOptions">
+                <div class="codex-field">
+                  <span>Модель</span>
+                  <select class="modal-input codex-select" id="codexModel">
+                    <option value="gpt-6-luna">gpt-6-luna</option>
+                    <option value="gpt-6.1-sol">gpt-6.1-sol</option>
+                    <option value="gpt-6-astra">gpt-6-astra</option>
+                  </select>
+                </div>
+                <div class="codex-field">
+                  <span>Уровень рассуждения</span>
+                  <select class="modal-input codex-select" id="codexReasoning">
+                    <option value="low">Низкое</option>
+                    <option value="medium">Среднее</option>
+                    <option value="high">Высокое</option>
+                  </select>
+                </div>
 
-              <div class="codex-status-row">
-                <p id="codexStatus" role="status" aria-live="polite">Статус Codex ещё не проверен.</p>
-                <button class="button button-secondary" id="checkCodexStatus" type="button">Проверить</button>
+                <div class="codex-status-row">
+                  <p id="codexStatus" role="status" aria-live="polite">Статус Codex ещё не проверен.</p>
+                  <button class="button button-secondary" id="checkCodexStatus" type="button">Проверить</button>
+                </div>
+              </div>
+              <div class="codex-provider-options" id="ollamaOptions" hidden>
+                <label class="codex-field codex-field-text" for="ollamaBaseUrl">
+                  <span>Адрес Ollama</span>
+                  <input class="modal-input codex-select" id="ollamaBaseUrl" type="url" inputmode="url" autocomplete="url" />
+                </label>
+                <div class="codex-field">
+                  <span>Модель</span>
+                  <select class="modal-input codex-select" id="ollamaModel" disabled>
+                    <option value="">Проверьте подключение</option>
+                  </select>
+                </div>
+                <div class="codex-status-row">
+                  <p id="ollamaStatus" role="status" aria-live="polite">Статус Ollama ещё не проверен.</p>
+                  <button class="button button-secondary" id="checkOllamaStatus" type="button">Проверить</button>
+                </div>
+              </div>
+              <div class="codex-provider-options" id="cloudRuOptions" hidden>
+                <label class="codex-field codex-field-text" for="cloudRuApiKey">
+                  <span>API-ключ Cloud.ru</span>
+                  <input class="modal-input codex-select" id="cloudRuApiKey" type="password" autocomplete="off" spellcheck="false" />
+                </label>
+                <div class="codex-field">
+                  <span>Модель</span>
+                  <select class="modal-input codex-select" id="cloudRuModel" disabled>
+                    <option value="">Проверьте подключение</option>
+                  </select>
+                </div>
+                <div class="codex-status-row">
+                  <p id="cloudRuStatus" role="status" aria-live="polite">Введите API-ключ и проверьте подключение.</p>
+                  <button class="button button-secondary" id="checkCloudRuStatus" type="button">Проверить</button>
+                </div>
+                <p class="codex-privacy-note cloudru-privacy-note">Ключ действует только до закрытия приложения и не сохраняется.</p>
+              </div>
+              <div class="codex-provider-options" id="yandexOptions" hidden>
+                <label class="codex-field codex-field-text" for="yandexApiKey">
+                  <span>API-ключ Yandex AI Studio</span>
+                  <input class="modal-input codex-select" id="yandexApiKey" type="password" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="codex-field codex-field-text" for="yandexFolderId">
+                  <span>ID каталога Yandex Cloud</span>
+                  <input class="modal-input codex-select" id="yandexFolderId" type="text" autocomplete="off" spellcheck="false" />
+                </label>
+                <div class="codex-field">
+                  <span>Модель</span>
+                  <select class="modal-input codex-select" id="yandexModel" disabled>
+                    <option value="">Проверьте подключение</option>
+                  </select>
+                </div>
+                <div class="codex-status-row">
+                  <p id="yandexStatus" role="status" aria-live="polite">Введите API-ключ и ID каталога, затем проверьте подключение.</p>
+                  <button class="button button-secondary" id="checkYandexStatus" type="button">Проверить</button>
+                </div>
+                <p class="codex-privacy-note">Нужна роль ai.languageModels.user и области ключа yc.ai.models.viewer, yc.ai.foundationModels.execute. Текст документа и сигналы передаются в Yandex AI Studio. Ключ хранится до закрытия приложения, ID каталога сохраняется в настройках.</p>
               </div>
             </div>
           </section>
+        </div>
+      </dialog>
+
+      <dialog class="modal app-info-modal" id="appInfoDialog" aria-labelledby="appInfoTitle">
+        <div class="modal-card">
+          <div class="modal-heading">
+            <h2 id="appInfoTitle">О программе</h2>
+            <button class="modal-close" id="closeAppInfo" type="button" aria-label="Закрыть"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg></button>
+          </div>
+          <div class="app-info-content">
+            <p class="app-info-brand">Норман АЭ</p>
+            <p class="app-info-release">Версия <span id="appVersion"></span></p>
+          </div>
         </div>
       </dialog>
 
@@ -198,6 +297,10 @@
             <section class="ai-review-section" aria-labelledby="aiReviewInputTitle">
               <h3 id="aiReviewInputTitle">Фрагмент источника</h3>
               <blockquote class="ai-review-excerpt" id="aiReviewExcerpt"></blockquote>
+            </section>
+            <section class="ai-review-section" id="aiReviewRuleSection" aria-labelledby="aiReviewRuleTitle" hidden>
+              <h3 id="aiReviewRuleTitle">Объяснение правила</h3>
+              <p class="ai-review-rule-explanation" id="aiReviewRuleExplanation"></p>
             </section>
             <section class="ai-review-section" aria-labelledby="aiReviewReasoningTitle">
               <h3 id="aiReviewReasoningTitle">Обоснование</h3>
@@ -256,15 +359,20 @@
           <aside class="findings-pane" aria-labelledby="findingsHeading">
             <div class="panel-heading findings-heading">
               <div class="findings-heading-title">
-                <h2 id="findingsHeading">Сигналы</h2>
+                <div class="findings-heading-label">
+                  <h2 id="findingsHeading">Сигналы</h2>
+                  <span class="result-count" id="resultCount">—</span>
+                </div>
                 <p class="ai-analysis-note" id="aiAnalysisNote" role="status" aria-live="polite" hidden></p>
                 <button class="button button-secondary ai-retry-button" id="retryAiAnalysis" type="button" hidden>
                   Перезапустить анализ
                 </button>
               </div>
               <div class="findings-heading-tools">
+                <button class="report-pdf-button" id="exportReportPdf" type="button" aria-label="Скачать PDF-отчёт" title="Подготовить PDF-отчёт" hidden>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v4h14v-4" /></svg>
+                </button>
                 <span class="spinner analysis-spinner" id="analysisStatus" role="status" aria-label="Идёт анализ" aria-live="polite" hidden></span>
-                <span class="result-count" id="resultCount">—</span>
                 <details class="confidence-legend">
                   <summary class="confidence-legend-trigger" aria-label="Пояснение цветов уверенности">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 7.5h.01" /></svg>

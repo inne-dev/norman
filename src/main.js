@@ -1,18 +1,31 @@
 import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import packageInfo from '../package.json';
+import { aiConfidenceLevel, findingConfidenceLevel, isAiFinding } from './finding-confidence.js';
+import { enhanceCustomSelects } from './custom-select.js';
+import { generateReportPdf } from './report-pdf.js';
 import './style.css';
 
 const isTauri = Boolean(window.__TAURI_INTERNALS__);
 const THEME_STORAGE_KEY = 'norman-color-theme';
 const CODEX_STORAGE_KEY = 'norman-codex-settings';
+const WELCOME_STORAGE_KEY = 'norman-welcome-shown';
+const OLLAMA_RAM_THRESHOLD_BYTES = 16 * 1024 ** 3;
 const DEFAULT_CODEX_SETTINGS = Object.freeze({
   enabled: false,
   provider: 'codex',
   model: 'gpt-6-luna',
   reasoningEffort: 'high',
+  ollamaBaseUrl: 'http://localhost:11434',
+  ollamaModel: '',
+  cloudRuModel: '',
+  yandexFolderId: '',
+  yandexModel: '',
   filterAdsInPreview: true,
   parallelProcesses: 1,
 });
@@ -49,6 +62,14 @@ let rejectedFindingsCount = null;
 let renderedFindingsOrderSignature = '';
 let codexStatus = { checked: false, installed: false, authenticated: false, version: '', message: '' };
 let codexStatusRequest = null;
+let ollamaStatus = { checked: false, available: false, models: [], message: '' };
+let ollamaStatusRequestId = 0;
+let cloudRuStatus = { checked: false, available: false, models: [], message: '' };
+let cloudRuStatusRequestId = 0;
+let cloudRuApiKey = '';
+let yandexStatus = { checked: false, available: false, models: [], message: '' };
+let yandexStatusRequestId = 0;
+let yandexApiKey = '';
 let pageFrameDocumentRef = null;
 let pageFrameBoundDocument = null;
 let pageFrameLoadToken = 0;
@@ -81,11 +102,24 @@ const ui = {
   dismissError: document.querySelector('#dismissError'),
   newDocument: document.querySelector('#newDocument'),
   openSettings: document.querySelector('#openSettings'),
+  welcomeDialog: document.querySelector('#welcomeDialog'),
+  closeWelcome: document.querySelector('#closeWelcome'),
+  continueWithoutAi: document.querySelector('#continueWithoutAi'),
+  welcomeOpenSettings: document.querySelector('#welcomeOpenSettings'),
+  welcomeOllama: document.querySelector('#welcomeOllama'),
+  welcomeMemory: document.querySelector('#welcomeMemory'),
   settingsDialog: document.querySelector('#settingsDialog'),
   closeSettings: document.querySelector('#closeSettings'),
+  openAppInfo: document.querySelector('#openAppInfo'),
+  appInfoDialog: document.querySelector('#appInfoDialog'),
+  closeAppInfo: document.querySelector('#closeAppInfo'),
+  appVersion: document.querySelector('#appVersion'),
   aiReviewDialog: document.querySelector('#aiReviewDialog'),
+  aiReviewTitle: document.querySelector('#aiReviewTitle'),
   closeAiReview: document.querySelector('#closeAiReview'),
   aiReviewExcerpt: document.querySelector('#aiReviewExcerpt'),
+  aiReviewRuleSection: document.querySelector('#aiReviewRuleSection'),
+  aiReviewRuleExplanation: document.querySelector('#aiReviewRuleExplanation'),
   aiReviewRationale: document.querySelector('#aiReviewRationale'),
   aiReviewConfidence: document.querySelector('#aiReviewConfidence'),
   aiReviewDecision: document.querySelector('#aiReviewDecision'),
@@ -93,8 +127,25 @@ const ui = {
   filterAdsInPreview: document.querySelector('#filterAdsInPreview'),
   codexOptions: document.querySelector('#codexOptions'),
   codexProvider: document.querySelector('#codexProvider'),
+  codexProviderOptions: document.querySelector('#codexProviderOptions'),
   codexModel: document.querySelector('#codexModel'),
   codexReasoning: document.querySelector('#codexReasoning'),
+  ollamaOptions: document.querySelector('#ollamaOptions'),
+  ollamaBaseUrl: document.querySelector('#ollamaBaseUrl'),
+  ollamaModel: document.querySelector('#ollamaModel'),
+  ollamaStatus: document.querySelector('#ollamaStatus'),
+  checkOllamaStatus: document.querySelector('#checkOllamaStatus'),
+  cloudRuOptions: document.querySelector('#cloudRuOptions'),
+  cloudRuApiKey: document.querySelector('#cloudRuApiKey'),
+  cloudRuModel: document.querySelector('#cloudRuModel'),
+  cloudRuStatus: document.querySelector('#cloudRuStatus'),
+  checkCloudRuStatus: document.querySelector('#checkCloudRuStatus'),
+  yandexOptions: document.querySelector('#yandexOptions'),
+  yandexApiKey: document.querySelector('#yandexApiKey'),
+  yandexFolderId: document.querySelector('#yandexFolderId'),
+  yandexModel: document.querySelector('#yandexModel'),
+  yandexStatus: document.querySelector('#yandexStatus'),
+  checkYandexStatus: document.querySelector('#checkYandexStatus'),
   parallelProcesses: document.querySelector('#parallelProcesses'),
   codexStatus: document.querySelector('#codexStatus'),
   checkCodexStatus: document.querySelector('#checkCodexStatus'),
@@ -119,7 +170,29 @@ const ui = {
   retryAiAnalysis: document.querySelector('#retryAiAnalysis'),
   retryAnalysis: document.querySelector('#retryAnalysis'),
   findingList: document.querySelector('#findingList'),
+  exportReportPdf: document.querySelector('#exportReportPdf'),
 };
+const customSelects = enhanceCustomSelects(document);
+
+function setAppVersion(version) {
+  ui.appVersion.textContent = version;
+}
+
+setAppVersion(packageInfo.version);
+
+const platform = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent;
+const currentPlatform = /win/i.test(platform) ? 'windows'
+  : /mac|darwin/i.test(platform) ? 'macos'
+    : /linux/i.test(platform) ? 'linux' : '';
+
+if (isTauri && currentPlatform === 'macos') {
+  document.documentElement.classList.add('macos-titlebar-overlay');
+  document.addEventListener('pointerdown', (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (event.button !== 0 || event.clientY > 40 || target?.closest('button, a, input, select, textarea')) return;
+    void getCurrentWindow().startDragging().catch(() => {});
+  });
+}
 
 function loadCodexSettings() {
   try {
@@ -129,13 +202,20 @@ function loadCodexSettings() {
       ...saved,
       enabled: saved.enabled === true,
       filterAdsInPreview: saved.filterAdsInPreview !== false,
-      provider: 'codex',
+      provider: ['ollama', 'cloudru', 'yandex'].includes(saved.provider) ? saved.provider : 'codex',
       model: ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra'].includes(saved.model)
         ? saved.model
         : DEFAULT_CODEX_SETTINGS.model,
       reasoningEffort: ['low', 'medium', 'high'].includes(saved.reasoningEffort)
         ? saved.reasoningEffort
         : DEFAULT_CODEX_SETTINGS.reasoningEffort,
+      ollamaBaseUrl: typeof saved.ollamaBaseUrl === 'string' && saved.ollamaBaseUrl.trim()
+        ? saved.ollamaBaseUrl.trim()
+        : DEFAULT_CODEX_SETTINGS.ollamaBaseUrl,
+      ollamaModel: typeof saved.ollamaModel === 'string' ? saved.ollamaModel : '',
+      cloudRuModel: typeof saved.cloudRuModel === 'string' ? saved.cloudRuModel : '',
+      yandexFolderId: typeof saved.yandexFolderId === 'string' ? saved.yandexFolderId : '',
+      yandexModel: typeof saved.yandexModel === 'string' ? saved.yandexModel : '',
       parallelProcesses: [1, 2, 3, 4].includes(Number(saved.parallelProcesses))
         ? Number(saved.parallelProcesses)
         : DEFAULT_CODEX_SETTINGS.parallelProcesses,
@@ -160,11 +240,21 @@ function syncCodexSettingsUI() {
   ui.filterAdsInPreview.checked = codexSettings.filterAdsInPreview;
   ui.codexOptions.hidden = !codexSettings.enabled;
   ui.codexProvider.value = codexSettings.provider;
+  ui.codexProviderOptions.hidden = codexSettings.provider !== 'codex';
   ui.codexModel.value = codexSettings.model;
   ui.codexReasoning.value = codexSettings.reasoningEffort;
+  ui.ollamaOptions.hidden = codexSettings.provider !== 'ollama';
+  ui.ollamaBaseUrl.value = codexSettings.ollamaBaseUrl;
+  renderOllamaStatus();
+  ui.cloudRuOptions.hidden = codexSettings.provider !== 'cloudru';
+  renderCloudRuStatus();
+  ui.yandexOptions.hidden = codexSettings.provider !== 'yandex';
+  ui.yandexFolderId.value = codexSettings.yandexFolderId;
+  renderYandexStatus();
   ui.parallelProcesses.value = String(codexSettings.parallelProcesses);
   renderCodexStatus();
   renderAiAnalysisNote();
+  customSelects.refresh();
 }
 
 let sourceTargets = new Map();
@@ -180,6 +270,7 @@ function getSavedTheme() {
 function setTheme(theme) {
   const selectedTheme = theme === 'light' ? 'light' : 'dark';
   document.documentElement.dataset.theme = selectedTheme;
+  customSelects.refresh();
   for (const input of ui.settingsDialog.querySelectorAll('input[name="theme"]')) {
     input.checked = input.value === selectedTheme;
   }
@@ -195,6 +286,57 @@ function setTheme(theme) {
 
 setTheme(getSavedTheme());
 syncCodexSettingsUI();
+void showWelcomeOnce();
+
+async function showWelcomeOnce() {
+  try {
+    if (localStorage.getItem(WELCOME_STORAGE_KEY) === 'shown') return;
+  } catch {
+    // Storage restrictions should not prevent the welcome from appearing.
+  }
+
+  let totalMemoryBytes = null;
+  if (isTauri) {
+    try {
+      const result = await invoke('get_system_memory_bytes');
+      if (Number.isFinite(result) && result > 0) totalMemoryBytes = result;
+    } catch {
+      // The general welcome still works when the platform cannot report memory.
+    }
+  }
+
+  const canOfferOllama = totalMemoryBytes !== null && totalMemoryBytes >= OLLAMA_RAM_THRESHOLD_BYTES;
+  ui.welcomeOllama.hidden = !canOfferOllama;
+  if (canOfferOllama) {
+    const memoryGiB = Math.round(totalMemoryBytes / 1024 ** 3);
+    ui.welcomeMemory.textContent = `Обнаружено около ${memoryGiB} ГБ оперативной памяти.`;
+    ui.welcomeMemory.hidden = false;
+    ui.welcomeOpenSettings.textContent = 'Настроить Ollama';
+  }
+
+  try {
+    localStorage.setItem(WELCOME_STORAGE_KEY, 'shown');
+  } catch {
+    // Keep the welcome usable for this session if storage is unavailable.
+  }
+  ui.welcomeDialog.showModal();
+}
+
+function closeWelcome() {
+  if (ui.welcomeDialog.open) ui.welcomeDialog.close();
+}
+
+function openSettingsFromWelcome() {
+  if (!ui.welcomeOllama.hidden) {
+    codexSettings.provider = 'ollama';
+    saveCodexSettings();
+  }
+  closeWelcome();
+  syncCodexSettingsUI();
+  ui.settingsDialog.showModal();
+  if (codexSettings.enabled) void refreshSelectedAiProviderStatus();
+  requestAnimationFrame(() => ui.codexEnabled.focus());
+}
 
 function setFollowedFinding(key, activeMark = null) {
   followedFindingId = key;
@@ -211,7 +353,7 @@ function setFollowedFinding(key, activeMark = null) {
   }
 }
 
-function keepFindingVisible(key) {
+function keepFindingVisible(key, { alignTop = false } = {}) {
   if (!key) return;
   const panel = ui.findingList.parentElement;
   if (!panel) return;
@@ -226,18 +368,31 @@ function keepFindingVisible(key) {
   const visibleTop = panelRect.top + panel.clientTop + 8;
   const visibleBottom = panelRect.top + panel.clientTop + panel.clientHeight - 8;
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  if (itemRect.top < visibleTop) {
+  if (alignTop) {
+    panel.scrollTo({ top: panel.scrollTop + itemRect.top - visibleTop, behavior: reducedMotion ? 'auto' : 'smooth' });
+  } else if (itemRect.top < visibleTop) {
     panel.scrollTo({ top: panel.scrollTop - (visibleTop - itemRect.top), behavior: reducedMotion ? 'auto' : 'smooth' });
   } else if (itemRect.bottom > visibleBottom) {
     panel.scrollTo({ top: panel.scrollTop + (itemRect.bottom - visibleBottom), behavior: reducedMotion ? 'auto' : 'smooth' });
   }
 }
 
-function selectFinding(key, { scrollPreview = true } = {}) {
+function keepExpandedFindingVisible(key) {
+  const panel = ui.findingList.parentElement;
+  const item = Array.from(panel?.querySelectorAll('.finding-card[data-finding-key]') || [])
+    .find((candidate) => candidate.dataset.findingKey === key);
+  const animation = item && findingDetailsAnimations.get(item.querySelector('.finding-details'));
+  const reveal = () => requestAnimationFrame(() => keepFindingVisible(key, { alignTop: true }));
+  if (animation) animation.addEventListener('finish', reveal, { once: true });
+  else reveal();
+}
+
+function selectFinding(key, { scrollPreview = true, focusFinding = false } = {}) {
   if (!key || !state.findings.some((finding, index) => findingKey(finding, index) === key)) return;
   state.selectedId = key;
   render();
-  keepFindingVisible(key);
+  if (focusFinding) keepExpandedFindingVisible(key);
+  else keepFindingVisible(key);
   if (scrollPreview && state.document?.url) scrollPageFindingIntoView(key);
 }
 
@@ -852,7 +1007,7 @@ function markPageFrameReady(url, documentRef, loadToken) {
         const mark = event.target?.closest?.('mark.norman-source-finding[data-finding-id]');
         if (mark) {
           event.preventDefault();
-          selectFinding(mark.dataset.findingId, { scrollPreview: false });
+          selectFinding(mark.dataset.findingId, { scrollPreview: false, focusFinding: true });
           return;
         }
         if (event.target?.closest?.('a[href]')) event.preventDefault();
@@ -861,7 +1016,7 @@ function markPageFrameReady(url, documentRef, loadToken) {
         const mark = event.target?.closest?.('mark.norman-source-finding[data-finding-id]');
         if (!mark || (event.key !== 'Enter' && event.key !== ' ')) return;
         event.preventDefault();
-        selectFinding(mark.dataset.findingId, { scrollPreview: false });
+        selectFinding(mark.dataset.findingId, { scrollPreview: false, focusFinding: true });
       });
       sourceDocument.addEventListener('submit', (event) => event.preventDefault());
     }
@@ -1028,6 +1183,346 @@ async function refreshCodexStatus() {
   return codexStatusRequest;
 }
 
+function renderOllamaStatus() {
+  const models = ollamaStatus.models;
+  const selectedModel = models.includes(codexSettings.ollamaModel)
+    ? codexSettings.ollamaModel
+    : (!ollamaStatus.checked && codexSettings.ollamaModel ? codexSettings.ollamaModel : '');
+  const options = models.length
+    ? models.map((model) => {
+      const option = document.createElement('option');
+      option.value = model;
+      option.textContent = model;
+      return option;
+    })
+    : [new Option(
+      ollamaStatus.checked && ollamaStatus.available ? 'Нет установленных моделей' : 'Проверьте подключение',
+      '',
+      true,
+      true,
+    )];
+  if (selectedModel && !models.includes(selectedModel)) {
+    const savedOption = document.createElement('option');
+    savedOption.value = selectedModel;
+    savedOption.textContent = selectedModel;
+    options.unshift(savedOption);
+  }
+  ui.ollamaModel.replaceChildren(...options);
+  ui.ollamaModel.value = selectedModel;
+  ui.ollamaModel.disabled = Boolean(ollamaStatus.checking)
+    || !ollamaStatus.checked
+    || !ollamaStatus.available
+    || models.length === 0;
+
+  if (ollamaStatus.checking) {
+    ui.ollamaStatus.textContent = 'Проверяем Ollama…';
+    ui.ollamaStatus.dataset.state = 'loading';
+  } else if (!ollamaStatus.checked) {
+    ui.ollamaStatus.textContent = isTauri
+      ? 'Подключение ещё не проверено.'
+      : 'Проверка и анализ Ollama доступны в настольном приложении.';
+    ui.ollamaStatus.dataset.state = 'idle';
+  } else if (!ollamaStatus.available || ollamaStatus.error) {
+    ui.ollamaStatus.textContent = ollamaStatus.message || 'Не удалось подключиться к Ollama.';
+    ui.ollamaStatus.dataset.state = 'error';
+  } else if (!models.length) {
+    ui.ollamaStatus.textContent = ollamaStatus.message || 'Ollama доступна, установленные модели не найдены.';
+    ui.ollamaStatus.dataset.state = 'error';
+  } else {
+    ui.ollamaStatus.textContent = ollamaStatus.message || `Подключено · моделей: ${models.length}`;
+    ui.ollamaStatus.dataset.state = 'ready';
+  }
+  ui.checkOllamaStatus.disabled = Boolean(ollamaStatus.checking);
+  ui.checkOllamaStatus.textContent = ollamaStatus.checking ? 'Проверяем…' : 'Проверить';
+}
+
+async function refreshOllamaStatus() {
+  const requestId = ++ollamaStatusRequestId;
+  if (!isTauri) {
+    ollamaStatus = {
+      checked: false,
+      available: false,
+      models: [],
+      message: 'Проверка и анализ Ollama доступны в настольном приложении.',
+    };
+    renderOllamaStatus();
+    return ollamaStatus;
+  }
+
+  ollamaStatus = { ...ollamaStatus, checking: true, error: false };
+  renderOllamaStatus();
+  try {
+    const result = await invoke('get_ollama_status', {
+      baseUrl: codexSettings.ollamaBaseUrl.trim() || null,
+    });
+    if (requestId !== ollamaStatusRequestId) return ollamaStatus;
+    const models = Array.isArray(result?.models)
+      ? result.models.filter((model) => typeof model === 'string' && model.trim()).map((model) => model.trim())
+      : [];
+    const selectedModel = models.includes(codexSettings.ollamaModel)
+      ? codexSettings.ollamaModel
+      : (models[0] || '');
+    const modelChanged = selectedModel !== codexSettings.ollamaModel;
+    codexSettings.ollamaModel = selectedModel;
+    ollamaStatus = {
+      checked: true,
+      available: result?.available === true,
+      models,
+      message: String(result?.message || ''),
+      checking: false,
+      error: false,
+    };
+    if (modelChanged) saveCodexSettings();
+  } catch (error) {
+    if (requestId !== ollamaStatusRequestId) return ollamaStatus;
+    ollamaStatus = {
+      checked: true,
+      available: false,
+      models: [],
+      message: `Не удалось подключиться к Ollama. ${messageFrom(error)}`,
+      checking: false,
+      error: true,
+    };
+  }
+  renderOllamaStatus();
+  return ollamaStatus;
+}
+
+function renderCloudRuStatus() {
+  const models = cloudRuStatus.models;
+  const savedModel = codexSettings.cloudRuModel;
+  const selectedModel = models.includes(savedModel)
+    ? savedModel
+    : (!cloudRuStatus.checked && savedModel ? savedModel : '');
+  const options = models.length
+    ? models.map((model) => new Option(model, model))
+    : [new Option(
+      cloudRuStatus.checked && cloudRuStatus.available ? 'Модели не найдены' : 'Проверьте подключение',
+      '',
+      true,
+      true,
+    )];
+  if (selectedModel && !models.includes(selectedModel)) options.unshift(new Option(selectedModel, selectedModel));
+  ui.cloudRuModel.replaceChildren(...options);
+  ui.cloudRuModel.value = selectedModel;
+  ui.cloudRuModel.disabled = Boolean(cloudRuStatus.checking)
+    || !cloudRuStatus.checked
+    || !cloudRuStatus.available
+    || models.length === 0;
+
+  if (cloudRuStatus.checking) {
+    ui.cloudRuStatus.textContent = 'Проверяем Cloud.ru…';
+    ui.cloudRuStatus.dataset.state = 'loading';
+  } else if (!isTauri) {
+    ui.cloudRuStatus.textContent = 'Проверка и анализ Cloud.ru доступны в настольном приложении.';
+    ui.cloudRuStatus.dataset.state = 'idle';
+  } else if (!cloudRuApiKey.trim()) {
+    ui.cloudRuStatus.textContent = 'Введите API-ключ Cloud.ru.';
+    ui.cloudRuStatus.dataset.state = 'idle';
+  } else if (!cloudRuStatus.checked) {
+    ui.cloudRuStatus.textContent = 'Ключ введён. Проверьте подключение.';
+    ui.cloudRuStatus.dataset.state = 'idle';
+  } else if (!cloudRuStatus.available || cloudRuStatus.error) {
+    ui.cloudRuStatus.textContent = cloudRuStatus.message || 'Не удалось подключиться к Cloud.ru.';
+    ui.cloudRuStatus.dataset.state = 'error';
+  } else if (!models.length) {
+    ui.cloudRuStatus.textContent = cloudRuStatus.message || 'Cloud.ru доступен, модели не найдены.';
+    ui.cloudRuStatus.dataset.state = 'error';
+  } else {
+    ui.cloudRuStatus.textContent = cloudRuStatus.message || `Подключено · моделей: ${models.length}`;
+    ui.cloudRuStatus.dataset.state = 'ready';
+  }
+  ui.checkCloudRuStatus.disabled = Boolean(cloudRuStatus.checking);
+  ui.checkCloudRuStatus.textContent = cloudRuStatus.checking ? 'Проверяем…' : 'Проверить';
+}
+
+function redactProviderSecret(message, secret = '') {
+  const text = String(message || 'Неизвестная ошибка.');
+  return secret ? text.split(secret).join('[скрыт]') : text;
+}
+
+function refreshSelectedAiProviderStatus() {
+  if (codexSettings.provider === 'ollama') return refreshOllamaStatus();
+  if (codexSettings.provider === 'cloudru') return refreshCloudRuStatus();
+  if (codexSettings.provider === 'yandex') return refreshYandexStatus();
+  return refreshCodexStatus();
+}
+
+async function refreshCloudRuStatus() {
+  const requestId = ++cloudRuStatusRequestId;
+  const apiKey = cloudRuApiKey.trim();
+  if (!isTauri) {
+    cloudRuStatus = {
+      checked: false,
+      available: false,
+      models: [],
+      message: 'Проверка и анализ Cloud.ru доступны в настольном приложении.',
+    };
+    renderCloudRuStatus();
+    return cloudRuStatus;
+  }
+  if (!apiKey) {
+    cloudRuStatus = {
+      checked: true,
+      available: false,
+      models: [],
+      message: 'Введите API-ключ Cloud.ru.',
+      error: true,
+    };
+    renderCloudRuStatus();
+    return cloudRuStatus;
+  }
+
+  cloudRuStatus = { ...cloudRuStatus, checking: true, error: false };
+  renderCloudRuStatus();
+  try {
+    const result = await invoke('get_cloudru_status', { apiKey });
+    if (requestId !== cloudRuStatusRequestId) return cloudRuStatus;
+    const models = Array.isArray(result?.models)
+      ? result.models.filter((model) => typeof model === 'string' && model.trim()).map((model) => model.trim())
+      : [];
+    const selectedModel = models.includes(codexSettings.cloudRuModel)
+      ? codexSettings.cloudRuModel
+      : (models[0] || '');
+    const modelChanged = selectedModel !== codexSettings.cloudRuModel;
+    codexSettings.cloudRuModel = selectedModel;
+    cloudRuStatus = {
+      checked: true,
+      available: result?.available === true,
+      models,
+      message: redactProviderSecret(result?.message, apiKey),
+      checking: false,
+      error: result?.available !== true,
+    };
+    if (modelChanged) saveCodexSettings();
+  } catch (error) {
+    if (requestId !== cloudRuStatusRequestId) return cloudRuStatus;
+    cloudRuStatus = {
+      checked: true,
+      available: false,
+      models: [],
+      message: `Не удалось подключиться к Cloud.ru. ${redactProviderSecret(messageFrom(error), apiKey)}`,
+      checking: false,
+      error: true,
+    };
+  }
+  renderCloudRuStatus();
+  return cloudRuStatus;
+}
+
+function renderYandexStatus() {
+  const models = yandexStatus.models;
+  const savedModel = codexSettings.yandexModel;
+  const selectedModel = models.includes(savedModel)
+    ? savedModel
+    : (!yandexStatus.checked && savedModel ? savedModel : '');
+  const options = models.length
+    ? models.map((model) => new Option(model, model))
+    : [new Option(
+      yandexStatus.checked && yandexStatus.available ? 'Модели не найдены' : 'Проверьте подключение',
+      '',
+      true,
+      true,
+    )];
+  if (selectedModel && !models.includes(selectedModel)) options.unshift(new Option(selectedModel, selectedModel));
+  ui.yandexModel.replaceChildren(...options);
+  ui.yandexModel.value = selectedModel;
+  ui.yandexModel.disabled = Boolean(yandexStatus.checking)
+    || !yandexStatus.checked
+    || !yandexStatus.available
+    || models.length === 0;
+
+  if (yandexStatus.checking) {
+    ui.yandexStatus.textContent = 'Проверяем Yandex AI Studio…';
+    ui.yandexStatus.dataset.state = 'loading';
+  } else if (!isTauri) {
+    ui.yandexStatus.textContent = 'Проверка и анализ Yandex AI Studio доступны в настольном приложении.';
+    ui.yandexStatus.dataset.state = 'idle';
+  } else if (!yandexApiKey.trim() || !codexSettings.yandexFolderId.trim()) {
+    ui.yandexStatus.textContent = !yandexApiKey.trim()
+      ? 'Введите API-ключ Yandex AI Studio.'
+      : 'Введите ID каталога Yandex Cloud.';
+    ui.yandexStatus.dataset.state = 'idle';
+  } else if (!yandexStatus.checked) {
+    ui.yandexStatus.textContent = 'Данные введены. Проверьте подключение.';
+    ui.yandexStatus.dataset.state = 'idle';
+  } else if (!yandexStatus.available || yandexStatus.error) {
+    ui.yandexStatus.textContent = yandexStatus.message || 'Не удалось подключиться к Yandex AI Studio.';
+    ui.yandexStatus.dataset.state = 'error';
+  } else if (!models.length) {
+    ui.yandexStatus.textContent = yandexStatus.message || 'Yandex AI Studio доступна, модели не найдены.';
+    ui.yandexStatus.dataset.state = 'error';
+  } else {
+    ui.yandexStatus.textContent = yandexStatus.message || `Подключено · моделей: ${models.length}`;
+    ui.yandexStatus.dataset.state = 'ready';
+  }
+  ui.checkYandexStatus.disabled = Boolean(yandexStatus.checking);
+  ui.checkYandexStatus.textContent = yandexStatus.checking ? 'Проверяем…' : 'Проверить';
+}
+
+async function refreshYandexStatus() {
+  const requestId = ++yandexStatusRequestId;
+  const apiKey = yandexApiKey.trim();
+  const folderId = codexSettings.yandexFolderId.trim();
+  if (!isTauri) {
+    yandexStatus = {
+      checked: false,
+      available: false,
+      models: [],
+      message: 'Проверка и анализ Yandex AI Studio доступны в настольном приложении.',
+    };
+    renderYandexStatus();
+    return yandexStatus;
+  }
+  if (!apiKey || !folderId) {
+    yandexStatus = {
+      checked: true,
+      available: false,
+      models: [],
+      message: !apiKey ? 'Введите API-ключ Yandex AI Studio.' : 'Введите ID каталога Yandex Cloud.',
+      error: true,
+    };
+    renderYandexStatus();
+    return yandexStatus;
+  }
+
+  yandexStatus = { ...yandexStatus, checking: true, error: false };
+  renderYandexStatus();
+  try {
+    const result = await invoke('get_yandex_status', { apiKey, folderId });
+    if (requestId !== yandexStatusRequestId) return yandexStatus;
+    const models = Array.isArray(result?.models)
+      ? result.models.filter((model) => typeof model === 'string' && model.trim()).map((model) => model.trim())
+      : [];
+    const selectedModel = models.includes(codexSettings.yandexModel)
+      ? codexSettings.yandexModel
+      : (models[0] || '');
+    const modelChanged = selectedModel !== codexSettings.yandexModel;
+    codexSettings.yandexModel = selectedModel;
+    yandexStatus = {
+      checked: true,
+      available: result?.available === true,
+      models,
+      message: redactProviderSecret(result?.message, apiKey),
+      checking: false,
+      error: result?.available !== true,
+    };
+    if (modelChanged) saveCodexSettings();
+  } catch (error) {
+    if (requestId !== yandexStatusRequestId) return yandexStatus;
+    yandexStatus = {
+      checked: true,
+      available: false,
+      models: [],
+      message: `Не удалось подключиться к Yandex AI Studio. ${redactProviderSecret(messageFrom(error), apiKey)}`,
+      checking: false,
+      error: true,
+    };
+  }
+  renderYandexStatus();
+  return yandexStatus;
+}
+
 function renderAiAnalysisNote() {
   let message = '';
   if (state.aiAnalysis === 'error' || state.aiAnalysis === 'unavailable') message = state.aiAnalysisMessage;
@@ -1192,22 +1687,6 @@ function renderProgress() {
   if (focusedStep >= 0) ui.analysisProgressSteps.children[focusedStep]?.focus({ preventScroll: true });
 }
 
-function isAiFinding(finding) {
-  const origin = String(finding.origin || '').toLocaleLowerCase();
-  return origin === 'ai' || origin === 'codex' || finding.aiConfidence != null || finding.aiRationale != null;
-}
-
-function aiConfidenceLevel(value) {
-  const confidence = String(value || '').toLocaleLowerCase().replace(/[ _]+/gu, '-');
-  if (confidence === 'high' || confidence.includes('высок')) return 'high';
-  if (confidence === 'medium' || confidence.includes('средн')) return 'medium';
-  if (confidence === 'low' || confidence.includes('низк')) return 'low';
-  if (['likely-false', 'likely-false-positive', 'false', 'false-positive-likely', 'вероятно-ложный'].includes(confidence)) {
-    return 'likely-false';
-  }
-  return 'unknown';
-}
-
 function aiConfidenceLabel(value) {
   return ({
     high: 'высокая',
@@ -1216,10 +1695,6 @@ function aiConfidenceLabel(value) {
     'likely-false': 'вероятно ложный сигнал',
     unknown: 'не указана',
   })[aiConfidenceLevel(value)];
-}
-
-function findingConfidenceLevel(finding) {
-  return isAiFinding(finding) ? aiConfidenceLevel(finding.aiConfidence) : 'possible';
 }
 
 function findingConfidenceMarker(confidence) {
@@ -1239,20 +1714,29 @@ function findingRowData(finding) {
   const rejectionReason = rejectedByAi
     ? String(finding.aiRejectionReason || finding.aiRationale || '').trim()
     : '';
-  const reason = rejectionReason
+  const standardReason = String(finding.reason || '').trim();
+  const aiRationale = aiFinding && !rejectedByAi
+    ? String(finding.aiRationale || '').trim()
+    : '';
+  const reason = rejectedByAi
     ? `Причина отсева: ${rejectionReason}`
-    : (aiFinding && finding.aiRationale) || finding.reason || 'Совпадение правила требует проверки в контексте.';
+    : standardReason && standardReason !== aiRationale
+      ? standardReason
+      : aiRationale ? '' : standardReason || 'Совпадение правила требует проверки в контексте.';
   return {
     aiFinding,
+    aiRationale,
+    aiProvider: String(finding.aiProvider || (String(finding.origin || '').toLocaleLowerCase() === 'ollama' ? 'ollama' : 'codex')),
     fullTitle,
     shortTitle,
     location,
     reason,
+    rejectedByAi,
     confidence: findingConfidenceLevel(finding),
     origin: String(finding.origin || (finding.aiConfidence != null ? 'algorithm' : 'codex')).toLocaleLowerCase(),
     signature: JSON.stringify([
-      fullTitle, location, finding.factor || '', finding.excerpt || '', reason,
-      aiFinding, finding.confidence || '', finding.aiConfidence || '', finding.origin || '',
+      fullTitle, location, finding.factor || '', finding.excerpt || '', reason, aiRationale,
+      aiFinding, finding.confidence || '', finding.aiConfidence || '', finding.origin || '', finding.aiProvider || '',
     ]),
   };
 }
@@ -1271,16 +1755,30 @@ function openAiReview(key) {
   const index = state.findings.findIndex((finding, itemIndex) => findingKey(finding, itemIndex) === key);
   if (index < 0) return;
   const finding = state.findings[index];
+  const providerLabel = aiProviderLabel(finding.aiProvider);
   const confidence = aiConfidenceLevel(finding.aiConfidence);
+  ui.aiReviewTitle.textContent = `Оценка · ${providerLabel}`;
   ui.aiReviewExcerpt.textContent = finding.excerpt || 'Фрагмент не сохранён.';
+  const ruleExplanation = String(finding.reason || '').trim();
+  ui.aiReviewRuleExplanation.textContent = ruleExplanation;
+  ui.aiReviewRuleSection.hidden = !ruleExplanation;
   ui.aiReviewRationale.textContent = (confidence === 'likely-false' && finding.aiRejectionReason)
     || finding.aiRationale
     || 'Краткое обоснование не сохранено.';
   ui.aiReviewConfidence.textContent = aiReviewConfidenceLabel(finding.aiConfidence);
   ui.aiReviewDecision.textContent = confidence === 'likely-false'
-    ? 'Codex не подтвердил сигнал; при необходимости его можно проверить вручную.'
+    ? `${providerLabel} не подтвердил сигнал; при необходимости его можно проверить вручную.`
     : 'Возможный сигнал; требуется экспертная проверка.';
   ui.aiReviewDialog.showModal();
+}
+
+function aiProviderLabel(provider) {
+  switch (String(provider || '').toLocaleLowerCase()) {
+    case 'ollama': return 'Ollama';
+    case 'cloudru': return 'Cloud.ru';
+    case 'yandex': return 'Yandex AI Studio';
+    default: return 'ChatGPT (Codex)';
+  }
 }
 
 function findingAriaLabel(finding, data, verifyStatus) {
@@ -1288,7 +1786,7 @@ function findingAriaLabel(finding, data, verifyStatus) {
     data.fullTitle,
     data.location,
     `Уровень ${findingConfidenceMarker(data.confidence)}`,
-    data.aiFinding ? `Уверенность Codex ${aiConfidenceLabel(finding.aiConfidence)}` : 'Возможно нарушение',
+    data.aiFinding ? `Уверенность ${data.aiProvider} ${aiConfidenceLabel(finding.aiConfidence)}` : 'Возможно нарушение',
     verifyStatus === 'active' ? 'Проверяется' : verifyStatus === 'queued' ? 'В очереди' : '',
   ].filter(Boolean).join('. ');
 }
@@ -1384,9 +1882,10 @@ function createFindingRow(finding, key, verifyStatus, data = findingRowData(find
     origin.className = 'finding-origin';
     origin.dataset.aiReviewFinding = key;
     origin.setAttribute('aria-haspopup', 'dialog');
-    origin.setAttribute('aria-label', 'Показать данные проверки ChatGPT (Codex)');
     origin.title = 'Показать входные данные и результат проверки';
-    origin.textContent = 'Codex';
+    const providerLabel = aiProviderLabel(data.aiProvider);
+    origin.textContent = providerLabel === 'ChatGPT (Codex)' ? 'Codex' : providerLabel;
+    origin.setAttribute('aria-label', `Показать данные проверки ${providerLabel}`);
     meta.append(origin);
   }
 
@@ -1414,7 +1913,19 @@ function createFindingRow(finding, key, verifyStatus, data = findingRowData(find
   details.append(meta);
   if (finding.factor) details.append(factor);
   if (finding.excerpt) details.append(excerpt);
-  details.append(reason);
+  if (data.reason && !(data.aiRationale && !data.rejectedByAi)) details.append(reason);
+  if (data.aiRationale) {
+    const aiExplanation = document.createElement('div');
+    aiExplanation.className = 'finding-ai-explanation';
+    const label = document.createElement('span');
+    label.className = 'finding-explanation-label';
+    label.textContent = 'Обоснование AI';
+    const rationale = document.createElement('span');
+    rationale.className = 'finding-ai-rationale';
+    rationale.textContent = data.aiRationale;
+    aiExplanation.append(label, rationale);
+    details.append(aiExplanation);
+  }
   item.append(button, details);
   setFindingVerifyStatus(item, finding, data, verifyStatus);
   return item;
@@ -1520,6 +2031,7 @@ function renderFindings() {
   const rejected = entries.filter(({ confidence }) => confidence === 'likely-false');
   const visible = entries.filter(({ confidence }) => confidence !== 'likely-false');
   ui.resultCount.textContent = state.analysis === 'idle' && !state.document ? '—' : String(visible.length);
+  ui.exportReportPdf.hidden = !(codexSettings.enabled && state.aiAnalysis === 'done' && state.document);
   const statuses = findingVerificationStatuses(entries);
   const orderSignature = JSON.stringify([visible.map(({ key }) => key), rejected.map(({ key }) => key)]);
   const orderChanged = orderSignature !== renderedFindingsOrderSignature;
@@ -1566,9 +2078,9 @@ function updateCodexProgress(tab, token, progress) {
   reflectAnalysisTab(tab);
 }
 
-function updateCodexFinding(tab, token, finding) {
+function updateAiFinding(tab, token, finding, provider) {
   if (tabById(tab.id) !== tab || token !== tab.analysisToken || !finding) return;
-  appendFindings([finding], tab);
+  appendFindings([{ ...finding, aiProvider: provider }], tab);
   reflectAnalysisTab(tab);
 }
 
@@ -1626,24 +2138,48 @@ async function analyzeCodexInBrowser(input, onProgress, onFinding) {
   return complete;
 }
 
-async function executeCodexReview(tab, token, parallelProcesses) {
+async function executeAiReview(tab, token, parallelProcesses) {
   tab.aiAnalysis = 'checking';
   tab.aiAnalysisMessage = '';
   tab.aiProgress = null;
   reflectAnalysisTab(tab);
 
-  const status = await refreshCodexStatus();
+  const provider = codexSettings.provider;
+  const providerLabel = aiProviderLabel(provider);
+  const status = provider === 'ollama'
+    ? await refreshOllamaStatus()
+    : provider === 'cloudru' ? await refreshCloudRuStatus()
+      : provider === 'yandex' ? await refreshYandexStatus() : await refreshCodexStatus();
   if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
   if (!codexSettings.enabled) {
     tab.aiAnalysis = 'idle';
     tab.aiAnalysisMessage = '';
     return;
   }
-  if (!codexPayloadIsAvailable(status) || ui.codexModel.disabled || ui.codexReasoning.disabled) {
+  const codexAvailable = codexPayloadIsAvailable(status);
+  const ollamaAvailable = status?.checked === true
+    && status.available === true
+    && status.models.includes(codexSettings.ollamaModel);
+  const cloudRuAvailable = status?.checked === true
+    && status.available === true
+    && status.models.includes(codexSettings.cloudRuModel);
+  const yandexAvailable = status?.checked === true
+    && status.available === true
+    && status.models.includes(codexSettings.yandexModel);
+  if ((provider === 'codex' && !codexAvailable)
+    || (provider === 'ollama' && !ollamaAvailable)
+    || (provider === 'cloudru' && !cloudRuAvailable)
+    || (provider === 'yandex' && !yandexAvailable)) {
     tab.aiAnalysis = 'unavailable';
-    tab.aiAnalysisMessage = status.message || (!status.installed
-      ? 'Codex CLI не найден. Локальные результаты сохранены.'
-      : 'Войдите в Codex CLI. Локальные результаты сохранены.');
+    tab.aiAnalysisMessage = status.message || (provider === 'ollama'
+      ? 'Выберите установленную модель Ollama. Локальные результаты сохранены.'
+      : provider === 'cloudru'
+        ? 'Проверьте API-ключ и модель Cloud.ru. Локальные результаты сохранены.'
+        : provider === 'yandex'
+          ? 'Проверьте API-ключ, ID каталога и модель Yandex AI Studio. Локальные результаты сохранены.'
+          : !status.installed
+            ? 'Codex CLI не найден. Локальные результаты сохранены.'
+            : 'Войдите в Codex CLI. Локальные результаты сохранены.');
     return;
   }
 
@@ -1653,17 +2189,43 @@ async function executeCodexReview(tab, token, parallelProcesses) {
   reflectAnalysisTab(tab);
 
   const onProgress = (progress) => updateCodexProgress(tab, token, progress);
-  const onFinding = (finding) => updateCodexFinding(tab, token, finding);
+  const onFinding = (finding) => updateAiFinding(tab, token, finding, provider);
   const unlisten = [];
   try {
     let result;
-    const input = {
-      text: tab.document.text,
-      findings: tab.findings,
-      model: codexSettings.model,
-      reasoningEffort: codexSettings.reasoningEffort,
-      parallelProcesses,
-    };
+    const input = provider === 'ollama'
+      ? {
+        baseUrl: codexSettings.ollamaBaseUrl.trim() || null,
+        text: tab.document.text,
+        findings: tab.findings,
+        model: codexSettings.ollamaModel,
+        parallelProcesses,
+      }
+      : provider === 'cloudru'
+        ? {
+          apiKey: cloudRuApiKey.trim(),
+          text: tab.document.text,
+          findings: tab.findings,
+          model: codexSettings.cloudRuModel,
+          reasoningEffort: null,
+          parallelProcesses,
+        }
+        : provider === 'yandex'
+          ? {
+            apiKey: yandexApiKey.trim(),
+            folderId: codexSettings.yandexFolderId.trim(),
+            text: tab.document.text,
+            findings: tab.findings,
+            model: codexSettings.yandexModel,
+            parallelProcesses,
+          }
+          : {
+            text: tab.document.text,
+            findings: tab.findings,
+            model: codexSettings.model,
+            reasoningEffort: codexSettings.reasoningEffort,
+            parallelProcesses,
+          };
     if (isTauri) {
       try {
         unlisten.push(await listen('ai-analysis-progress', (event) => onProgress(event.payload || {})));
@@ -1671,21 +2233,30 @@ async function executeCodexReview(tab, token, parallelProcesses) {
       } catch {
         // Final invoke result still supplies all findings if event listening is unavailable.
       }
-      result = await invoke('analyze_with_codex', input);
+      const command = provider === 'ollama' ? 'analyze_with_ollama'
+        : provider === 'cloudru' ? 'analyze_with_cloudru'
+          : provider === 'yandex' ? 'analyze_with_yandex' : 'analyze_with_codex';
+      result = await invoke(command, input);
     } else {
+      if (provider !== 'codex') throw new Error(`Проверка ${providerLabel} доступна только в настольном приложении.`);
       result = await analyzeCodexInBrowser(input, onProgress, onFinding);
     }
     if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
     const resultFindings = Array.isArray(result) ? result : result?.findings;
-    if (!Array.isArray(resultFindings)) throw new Error('Codex не вернул итоговый список сигналов.');
-    tab.findings = mergeFindings(tab.findings, resultFindings);
+    if (!Array.isArray(resultFindings)) throw new Error(`${providerLabel} не вернул итоговый список сигналов.`);
+    tab.findings = mergeFindings(tab.findings, resultFindings.map((finding) => ({ ...finding, aiProvider: provider })));
     tab.aiAnalysis = 'done';
     tab.aiProgress = null;
     tab.aiAnalysisMessage = '';
   } catch (error) {
     if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
     tab.aiAnalysis = 'error';
-    tab.aiAnalysisMessage = `Проверка Codex не завершилась. Локальные результаты сохранены. ${messageFrom(error)}`;
+    const errorMessage = provider === 'cloudru'
+      ? redactProviderSecret(messageFrom(error), cloudRuApiKey.trim())
+      : provider === 'yandex'
+        ? redactProviderSecret(messageFrom(error), yandexApiKey.trim())
+        : messageFrom(error);
+    tab.aiAnalysisMessage = `Проверка ${providerLabel} не завершилась. Локальные результаты сохранены. ${errorMessage}`;
   } finally {
     for (const stop of unlisten) stop();
   }
@@ -1730,7 +2301,7 @@ async function executeAnalysis(tab, token) {
       }, parallelProcesses);
     if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
     tab.findings = mergeFindings(tab.findings, Array.isArray(result?.findings) ? result.findings : []);
-    if (codexSettings.enabled) await executeCodexReview(tab, token, parallelProcesses);
+    if (codexSettings.enabled) await executeAiReview(tab, token, parallelProcesses);
     tab.analysis = 'done';
     tab.progress = null;
   } catch (error) {
@@ -1783,7 +2354,7 @@ function runAnalysis(tabId = state.activeId) {
   return job;
 }
 
-async function retryCodexAnalysis(tabId = state.activeId) {
+async function retryAiAnalysis(tabId = state.activeId) {
   const tab = tabById(tabId);
   if (!tab || !tab.document || tab.analysis !== 'done'
     || (tab.aiAnalysis !== 'error' && tab.aiAnalysis !== 'unavailable')
@@ -1978,10 +2549,35 @@ if (isTauri) {
 }
 
 ui.newDocument.addEventListener('click', startNewTab);
+ui.exportReportPdf.addEventListener('click', () => {
+  if (!codexSettings.enabled || state.aiAnalysis !== 'done' || !state.document) return;
+  const reportFindings = state.findings.filter((finding) => findingConfidenceLevel(finding) !== 'likely-false');
+  try {
+    generateReportPdf(state.document, reportFindings);
+  } catch (error) {
+    state.loadError = messageFrom(error);
+    renderError();
+  }
+});
+ui.openAppInfo.addEventListener('click', () => {
+  setAppVersion(packageInfo.version);
+  ui.appInfoDialog.showModal();
+  if (isTauri) void getVersion().then(setAppVersion).catch(() => {});
+});
+ui.closeAppInfo.addEventListener('click', () => ui.appInfoDialog.close());
+ui.appInfoDialog.addEventListener('click', (event) => {
+  if (event.target === ui.appInfoDialog) ui.appInfoDialog.close();
+});
 ui.openSettings.addEventListener('click', () => {
   syncCodexSettingsUI();
   ui.settingsDialog.showModal();
-  if (codexSettings.enabled) void refreshCodexStatus();
+  if (codexSettings.enabled) void refreshSelectedAiProviderStatus();
+});
+ui.closeWelcome.addEventListener('click', closeWelcome);
+ui.continueWithoutAi.addEventListener('click', closeWelcome);
+ui.welcomeOpenSettings.addEventListener('click', openSettingsFromWelcome);
+ui.welcomeDialog.addEventListener('click', (event) => {
+  if (event.target === ui.welcomeDialog) closeWelcome();
 });
 ui.closeSettings.addEventListener('click', () => ui.settingsDialog.close());
 ui.closeAiReview.addEventListener('click', () => ui.aiReviewDialog.close());
@@ -1989,6 +2585,21 @@ ui.aiReviewDialog.addEventListener('click', (event) => {
   if (event.target === ui.aiReviewDialog) ui.aiReviewDialog.close();
 });
 ui.checkCodexStatus.addEventListener('click', () => void refreshCodexStatus());
+ui.checkOllamaStatus.addEventListener('click', () => void refreshOllamaStatus());
+ui.checkCloudRuStatus.addEventListener('click', () => void refreshCloudRuStatus());
+ui.checkYandexStatus.addEventListener('click', () => void refreshYandexStatus());
+ui.cloudRuApiKey.addEventListener('input', () => {
+  cloudRuApiKey = ui.cloudRuApiKey.value;
+  cloudRuStatusRequestId += 1;
+  cloudRuStatus = { checked: false, available: false, models: [], message: '' };
+  renderCloudRuStatus();
+});
+ui.yandexApiKey.addEventListener('input', () => {
+  yandexApiKey = ui.yandexApiKey.value;
+  yandexStatusRequestId += 1;
+  yandexStatus = { checked: false, available: false, models: [], message: '' };
+  renderYandexStatus();
+});
 ui.settingsDialog.addEventListener('click', (event) => {
   if (event.target === ui.settingsDialog) ui.settingsDialog.close();
 });
@@ -2005,16 +2616,43 @@ ui.settingsDialog.addEventListener('change', (event) => {
     syncCodexSettingsUI();
     render();
   }
+  if (event.target === ui.codexProvider) {
+    codexSettings.provider = ['ollama', 'cloudru', 'yandex'].includes(ui.codexProvider.value) ? ui.codexProvider.value : 'codex';
+    saveCodexSettings();
+    syncCodexSettingsUI();
+    if (codexSettings.enabled) void refreshSelectedAiProviderStatus();
+  }
+  if (event.target === ui.ollamaBaseUrl) {
+    codexSettings.ollamaBaseUrl = ui.ollamaBaseUrl.value.trim() || DEFAULT_CODEX_SETTINGS.ollamaBaseUrl;
+    ollamaStatusRequestId += 1;
+    ollamaStatus = { checked: false, available: false, models: [], message: '' };
+    saveCodexSettings();
+    renderOllamaStatus();
+    if (codexSettings.enabled && codexSettings.provider === 'ollama') void refreshOllamaStatus();
+  }
+  if (event.target === ui.ollamaModel) codexSettings.ollamaModel = ui.ollamaModel.value;
+  if (event.target === ui.cloudRuModel) codexSettings.cloudRuModel = ui.cloudRuModel.value;
+  if (event.target === ui.yandexFolderId) {
+    codexSettings.yandexFolderId = ui.yandexFolderId.value.trim();
+    yandexStatusRequestId += 1;
+    yandexStatus = { checked: false, available: false, models: [], message: '' };
+    saveCodexSettings();
+    renderYandexStatus();
+    if (codexSettings.enabled && codexSettings.provider === 'yandex') void refreshYandexStatus();
+  }
+  if (event.target === ui.yandexModel) codexSettings.yandexModel = ui.yandexModel.value;
   if (event.target === ui.codexModel) codexSettings.model = ui.codexModel.value;
   if (event.target === ui.codexReasoning) codexSettings.reasoningEffort = ui.codexReasoning.value;
   if (event.target === ui.parallelProcesses) {
     const selected = Number(ui.parallelProcesses.value);
     codexSettings.parallelProcesses = [1, 2, 3, 4].includes(selected) ? selected : 1;
   }
-  if (event.target === ui.codexEnabled || event.target === ui.codexModel || event.target === ui.codexReasoning || event.target === ui.parallelProcesses) {
+  if ([ui.codexEnabled, ui.codexProvider, ui.ollamaBaseUrl, ui.ollamaModel, ui.cloudRuModel, ui.yandexModel, ui.codexModel, ui.codexReasoning, ui.parallelProcesses].includes(event.target)) {
     saveCodexSettings();
   }
-  if (event.target === ui.codexEnabled && codexSettings.enabled) void refreshCodexStatus();
+  if (event.target === ui.codexEnabled && codexSettings.enabled) {
+    void refreshSelectedAiProviderStatus();
+  }
 });
 
 ui.tabList.addEventListener('click', (event) => {
@@ -2066,6 +2704,7 @@ ui.findingList.parentElement.addEventListener('click', (event) => {
   state.selectedId = state.selectedId === button.dataset.findingId ? null : button.dataset.findingId;
   render();
   if (state.selectedId) {
+    keepExpandedFindingVisible(state.selectedId);
     if (state.document?.url) scrollPageFindingIntoView(state.selectedId);
     else {
       const target = sourceTargets.get(state.selectedId);
@@ -2075,7 +2714,7 @@ ui.findingList.parentElement.addEventListener('click', (event) => {
       }
     }
   }
-  keepFindingVisible(state.selectedId || followedFindingId);
+  if (!state.selectedId) keepFindingVisible(followedFindingId);
 });
 
 ui.documentText.addEventListener('click', (event) => {
@@ -2086,13 +2725,13 @@ ui.documentText.addEventListener('click', (event) => {
   state.selectedId = key;
   render();
   sourceTargets.get(key)?.focus({ preventScroll: true });
-  keepFindingVisible(key);
+  keepExpandedFindingVisible(key);
 });
 
 ui.textPanel.addEventListener('scroll', scheduleFindingToSourceScroll, { passive: true });
 
 ui.retryAnalysis.addEventListener('click', () => runAnalysis());
-ui.retryAiAnalysis.addEventListener('click', () => { void retryCodexAnalysis(); });
+ui.retryAiAnalysis.addEventListener('click', () => { void retryAiAnalysis(); });
 ui.dismissError.addEventListener('click', () => {
   state.loadError = '';
   renderError();
