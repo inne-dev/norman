@@ -31,10 +31,13 @@ npm run tauri dev
 
 ```sh
 npm ci
+npm run build:macos                         # локальный .app без подписи, только для текущего Mac
 npm run tauri build -- --bundles dmg      # macOS
 npm run tauri build -- --bundles nsis     # Windows
 npm run tauri build -- --bundles appimage # Linux
 ```
+
+`npm run build:macos` создаёт `src-tauri/target/release/bundle/macos/Норман АЭ.app` для архитектуры текущего Mac, без DMG и подписи. Для сборки нужны Node.js, Rust stable, Xcode Command Line Tools и системные зависимости Tauri.
 
 Для выпуска укажите одинаковую версию в `package.json` и `src-tauri/tauri.conf.json`, проверьте её и отправьте тег:
 

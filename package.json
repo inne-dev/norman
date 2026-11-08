@@ -7,13 +7,15 @@
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "vite build",
     "tauri": "tauri",
+    "build:macos": "tauri build --bundles app --no-sign",
     "release:set-version": "node scripts/set-release-version.mjs",
     "release:check": "node scripts/check-release-version.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.0.0",
-    "@tauri-apps/plugin-opener": "^2.0.0"
+    "@tauri-apps/plugin-opener": "^2.0.0",
+    "pdfmake": "^0.2.20"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

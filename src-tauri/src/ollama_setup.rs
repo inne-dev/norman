@@ -341,7 +341,7 @@ fn download_verified_asset(
     check_setup_cancelled()?;
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(1))
+        .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::limited(10))
         .user_agent("Norman Ollama installer")
         .build()

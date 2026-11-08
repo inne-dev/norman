@@ -8,8 +8,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import packageInfo from '../package.json';
 import { aiConfidenceLevel, findingConfidenceLevel, isAiFinding } from './finding-confidence.js';
 import { enhanceCustomSelects, makeProviderIcon } from './custom-select.js';
-import { allModelsForRecommendation, OLLAMA_RAM_THRESHOLD_BYTES, recommendationForMemory } from './ollama-recommendations.js';
-import { generateReportPdf } from './report-pdf.js';
+import { allModelsForRecommendation, recommendationForMemory } from './ollama-recommendations.js';
 import './style.css';
 
 const isTauri = Boolean(window.__TAURI_INTERNALS__);
@@ -79,9 +78,6 @@ let cloudRuApiKey = '';
 let yandexStatus = { checked: false, available: false, models: [], message: '' };
 let yandexStatusRequestId = 0;
 let yandexApiKey = '';
-let welcomeRecommendation = null;
-let welcomeInstallInProgress = false;
-let welcomeInstallComplete = false;
 let ollamaInstallInProgress = false;
 let ollamaInstallCancellationRequested = false;
 let ollamaBrowserInstallController = null;
@@ -90,6 +86,7 @@ let settingsOllamaMemoryBytes = null;
 let settingsOllamaRecommendation = null;
 let pageFrameDocumentRef = null;
 let pageFrameBoundDocument = null;
+const boundPreviewFindingMarks = new WeakSet();
 let pageFrameLoadToken = 0;
 let pageFrameFilterAds = null;
 const findingDetailsAnimations = new WeakMap();
@@ -125,14 +122,6 @@ const ui = {
   closeWelcome: document.querySelector('#closeWelcome'),
   continueWithoutAi: document.querySelector('#continueWithoutAi'),
   welcomeOpenSettings: document.querySelector('#welcomeOpenSettings'),
-  welcomeOllama: document.querySelector('#welcomeOllama'),
-  welcomeMemory: document.querySelector('#welcomeMemory'),
-  welcomeModel: document.querySelector('#welcomeModel'),
-  welcomeModelNote: document.querySelector('#welcomeModelNote'),
-  welcomeInstallerNote: document.querySelector('#welcomeInstallerNote'),
-  welcomeInstallOllama: document.querySelector('#welcomeInstallOllama'),
-  welcomeProgress: document.querySelector('#welcomeProgress'),
-  welcomeInstallStatus: document.querySelector('#welcomeInstallStatus'),
   settingsDialog: document.querySelector('#settingsDialog'),
   settingsTitle: document.querySelector('#settingsTitle'),
   aiSettingsGroup: document.querySelector('#aiSettingsGroup'),
@@ -235,6 +224,7 @@ const ui = {
   retryAnalysis: document.querySelector('#retryAnalysis'),
   findingList: document.querySelector('#findingList'),
   exportReportPdf: document.querySelector('#exportReportPdf'),
+  reportExportStatus: document.querySelector('#reportExportStatus'),
 };
 const customSelects = enhanceCustomSelects(document);
 
@@ -384,44 +374,15 @@ function setTheme(theme) {
 
 setTheme(getSavedTheme());
 syncCodexSettingsUI();
-void showWelcome();
+showWelcome();
 
-async function showWelcome(force = false) {
+function showWelcome(force = false) {
   if (!force) {
     try {
       if (localStorage.getItem(WELCOME_STORAGE_KEY) === 'shown') return;
     } catch {
       // Storage restrictions should not prevent the welcome from appearing.
     }
-  }
-
-  let totalMemoryBytes = null;
-  if (isTauri) {
-    try {
-      const result = await invoke('get_system_memory_bytes');
-      if (Number.isFinite(result) && result > 0) totalMemoryBytes = result;
-    } catch {
-      // The general welcome still works when the platform cannot report memory.
-    }
-  }
-
-  welcomeRecommendation = recommendationForMemory(totalMemoryBytes);
-  const canOfferOllama = totalMemoryBytes >= OLLAMA_RAM_THRESHOLD_BYTES && Boolean(welcomeRecommendation);
-  ui.welcomeOllama.hidden = !canOfferOllama;
-  if (canOfferOllama) {
-    const memoryGb = Math.round(totalMemoryBytes / 1_000_000_000);
-    ui.welcomeMemory.textContent = `Обнаружено около ${memoryGb} ГБ оперативной памяти.`;
-    ui.welcomeMemory.hidden = false;
-    const models = allModelsForRecommendation(welcomeRecommendation);
-    ui.welcomeModel.replaceChildren(...models.map(({ name, tag, size }) => {
-      const option = new Option(`${name} · ${size}`, tag);
-      return option;
-    }));
-    ui.welcomeModel.value = welcomeRecommendation.recommended.tag;
-    ui.welcomeInstallerNote.textContent = ollamaInstallerNote(currentPlatform);
-    ui.welcomeInstallOllama.hidden = !isTauri;
-    renderWelcomeModelNote();
-    customSelects.refresh();
   }
 
   if (!force) {
@@ -435,7 +396,6 @@ async function showWelcome(force = false) {
 }
 
 function closeWelcome() {
-  if (welcomeInstallInProgress) return;
   if (ui.welcomeDialog.open) ui.welcomeDialog.close();
 }
 
@@ -465,62 +425,15 @@ function openSettingsFromWelcome() {
   showSettingsDialog({ aiOnly: true, focusTarget: ui.codexEnabled });
 }
 
-function ollamaInstallerNote(selectedPlatform) {
-  const selected = allModelsForRecommendation(welcomeRecommendation)
-    .find((model) => model.tag === ui.welcomeModel.value) || welcomeRecommendation?.recommended;
-  const installSize = selectedPlatform === 'windows' ? 'около 1,6 ГБ'
-    : selectedPlatform === 'macos' ? 'около 219 МБ'
-      : selectedPlatform === 'linux' ? 'около 1,4–1,5 ГБ'
-        : 'не поддерживается в этой системе';
-  const platformNote = selectedPlatform === 'linux'
-    ? 'Ollama установится в папку пользователя без изменения системных пакетов; для распаковки нужен zstd.'
-    : 'Будет загружена официальная сборка Ollama.';
-  const modelNote = selected ? `Модель займёт примерно ${selected.size}; ` : '';
-  return `${modelNote}загрузка Ollama — ${installSize}. ${platformNote} Скачается только выбранная модель.`;
-}
-
-function renderWelcomeModelNote() {
-  const selected = allModelsForRecommendation(welcomeRecommendation)
-    .find((model) => model.tag === ui.welcomeModel.value);
-  if (!selected) return;
-  ui.welcomeModelNote.textContent = `Тег Ollama: ${selected.tag}. Размер весов: ${selected.size}. Модели и контекст могут требовать дополнительную память и место на диске.`;
-  ui.welcomeInstallerNote.textContent = ollamaInstallerNote(currentPlatform);
-  if (!welcomeInstallInProgress && !welcomeInstallComplete) {
-    ui.welcomeInstallOllama.textContent = `Установить Ollama и скачать ${selected.name}`;
-  }
-}
-
 function formatDownloadedBytes(value) {
   if (!Number.isFinite(value) || value < 0) return '';
   const gib = value / 1024 ** 3;
   return gib < 0.1 ? `${Math.round(value / 1024 ** 2)} МБ` : `${gib.toFixed(1)} ГБ`;
 }
 
-function installStatus(message, stateName = 'loading') {
-  ui.welcomeInstallStatus.textContent = message;
-  ui.welcomeInstallStatus.dataset.state = stateName;
-  ui.welcomeInstallStatus.hidden = false;
-}
-
 function ollamaInstallFailureMessage(error) {
   const detail = messageFrom(error);
   return `Не удалось настроить Ollama и загрузить модель. ${detail} Нажмите «Повторить установку»: приложение проверит состояние Ollama и повторит загрузку модели. Если ошибка повторится, проверьте подключение к интернету и свободное место.`;
-}
-
-function setWelcomeInstallBusy(busy) {
-  welcomeInstallInProgress = busy;
-  ui.welcomeInstallOllama.disabled = busy;
-  if (busy) ui.welcomeInstallOllama.textContent = 'Настраиваем Ollama…';
-  else if (!welcomeInstallComplete && ui.welcomeInstallStatus.dataset.state === 'error') {
-    ui.welcomeInstallOllama.textContent = 'Повторить установку';
-  }
-  ui.welcomeOpenSettings.disabled = busy;
-  ui.continueWithoutAi.disabled = busy;
-  ui.closeWelcome.disabled = busy;
-  ui.welcomeModel.disabled = busy;
-  ui.welcomeProgress.hidden = !busy;
-  ui.welcomeProgress.removeAttribute('value');
-  ui.welcomeProgress.value = 0;
 }
 
 function humanizeOllamaPullStatus(status) {
@@ -556,7 +469,7 @@ function hideOllamaDownloadStatus() {
   ui.ollamaDownloadStatus.hidden = true;
 }
 
-async function waitForLocalOllama(onStatus = installStatus) {
+async function waitForLocalOllama(onStatus = settingsOllamaInstallStatus) {
   const attempts = 120;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     throwIfOllamaSetupCancelled();
@@ -703,49 +616,6 @@ async function installOllamaModel(selected, onStatus, onProgress) {
     stopInstallListening();
     stopPullListening();
     ollamaInstallInProgress = false;
-  }
-}
-
-async function installOllamaFromWelcome() {
-  if (!isTauri || !welcomeRecommendation || welcomeInstallInProgress || ollamaInstallInProgress) return;
-  const selected = allModelsForRecommendation(welcomeRecommendation)
-    .find((model) => model.tag === ui.welcomeModel.value);
-  if (!selected) return;
-
-  setWelcomeInstallBusy(true);
-  try {
-    const installedStatus = await installOllamaModel(selected, installStatus, (payload, type) => {
-      if (type === 'install' && Number.isFinite(payload.total) && payload.total > 0 && Number.isFinite(payload.completed)) {
-        ui.welcomeProgress.hidden = false;
-        ui.welcomeProgress.value = Math.min(100, Math.max(0, payload.completed / payload.total * 100));
-      } else if (type === 'install') {
-        ui.welcomeProgress.removeAttribute('value');
-      } else if (type === 'pull' && Number.isFinite(payload.total) && payload.total > 0) {
-        ui.welcomeProgress.value = Math.min(100, Math.max(0, payload.completed / payload.total * 100));
-      } else if (type === 'pull') {
-        ui.welcomeProgress.removeAttribute('value');
-      }
-    });
-    ollamaStatus = { checked: true, installed: true, available: true, models: installedStatus.models, message: installedStatus.message || '' };
-    codexSettings.provider = 'ollama';
-    codexSettings.ollamaBaseUrl = 'http://127.0.0.1:11434';
-    codexSettings.ollamaModel = selected.tag;
-    saveCodexSettings();
-    renderOllamaStatus();
-    customSelects.refresh();
-    welcomeInstallComplete = true;
-    ui.welcomeInstallOllama.textContent = 'Открыть настройки';
-    ui.welcomeProgress.value = 100;
-    installStatus(`${selected.name} установлена. ИИ пока выключен; включить его можно в настройках.`, 'ready');
-  } catch (error) {
-    installStatus(ollamaInstallFailureMessage(error), 'error');
-  } finally {
-    setWelcomeInstallBusy(false);
-    if (welcomeInstallComplete) {
-      ui.welcomeProgress.hidden = false;
-      ui.welcomeProgress.value = 100;
-      ui.welcomeInstallOllama.textContent = 'Открыть настройки';
-    }
   }
 }
 
@@ -1250,12 +1120,12 @@ function buildPagePreviewHtml(source, url, { filterAds = true } = {}) {
   base.href = url;
   const highlightStyle = parsed.createElement('style');
   highlightStyle.textContent = [
-    'mark.norman-source-finding { color: inherit !important; background: rgba(230, 201, 95, .38) !important; border-radius: .16em; box-decoration-break: clone; -webkit-box-decoration-break: clone; outline: 1px solid rgba(230, 201, 95, .9); text-decoration: underline; text-decoration-color: rgba(150, 118, 25, .9); text-decoration-style: dotted; scroll-margin-block-start: 5rem; cursor: pointer; }',
-    'mark.norman-source-finding[data-confidence="high"] { background: rgba(231, 121, 112, .34) !important; outline-color: rgba(231, 121, 112, .9); text-decoration-color: #b7463d; }',
-    'mark.norman-source-finding[data-confidence="medium"] { background: rgba(229, 160, 82, .36) !important; outline-color: rgba(229, 160, 82, .92); text-decoration-color: #a66320; }',
-    'mark.norman-source-finding[data-confidence="low"], mark.norman-source-finding[data-confidence="possible"] { background: rgba(230, 201, 95, .38) !important; outline-color: rgba(230, 201, 95, .92); text-decoration-color: #967619; }',
-    'mark.norman-source-finding[data-confidence="likely-false"] { background: rgba(154, 164, 170, .28) !important; outline-color: rgba(120, 130, 136, .86); text-decoration-color: #77838a; }',
-    'mark.norman-source-finding.is-followed { outline-width: 2px; box-shadow: 0 0 0 2px rgba(20, 115, 230, .22); }',
+    'button.norman-source-finding { appearance: none; -webkit-appearance: none; display: inline; box-sizing: border-box; margin: 0; padding: 0; border: 0; color: inherit !important; font: inherit; line-height: inherit; text-align: inherit; vertical-align: baseline; background: rgba(230, 201, 95, .38) !important; border-radius: .16em; box-decoration-break: clone; -webkit-box-decoration-break: clone; outline: 1px solid rgba(230, 201, 95, .9); text-decoration: underline; text-decoration-color: rgba(150, 118, 25, .9); text-decoration-style: dotted; scroll-margin-block-start: 5rem; cursor: pointer; pointer-events: auto !important; }',
+    'button.norman-source-finding[data-confidence="high"] { background: rgba(231, 121, 112, .34) !important; outline-color: rgba(231, 121, 112, .9); text-decoration-color: #b7463d; }',
+    'button.norman-source-finding[data-confidence="medium"] { background: rgba(229, 160, 82, .36) !important; outline-color: rgba(229, 160, 82, .92); text-decoration-color: #a66320; }',
+    'button.norman-source-finding[data-confidence="low"], button.norman-source-finding[data-confidence="possible"] { background: rgba(230, 201, 95, .38) !important; outline-color: rgba(230, 201, 95, .92); text-decoration-color: #967619; }',
+    'button.norman-source-finding[data-confidence="likely-false"] { background: rgba(154, 164, 170, .28) !important; outline-color: rgba(120, 130, 136, .86); text-decoration-color: #77838a; }',
+    'button.norman-source-finding.is-followed { outline-width: 2px; box-shadow: 0 0 0 2px rgba(20, 115, 230, .22); }',
   ].join('\n');
   parsed.head.prepend(policy, base);
   parsed.head.append(highlightStyle);
@@ -1368,14 +1238,31 @@ function syncPageFrameHighlights(sourceDocument = ui.pageFrame.contentDocument) 
   if (!sourceDocument?.body) return;
   const findingsByKey = new Map(state.findings.map((finding, index) => [findingKey(finding, index), finding]));
   const existingKeys = new Set();
+  const bindFindingActivation = (mark) => {
+    // Event listeners are not preserved when the parsed preview is serialized into iframe.srcdoc.
+    // Keep the binding marker out of the DOM so the live iframe marks receive their own handlers.
+    if (boundPreviewFindingMarks.has(mark)) return;
+    boundPreviewFindingMarks.add(mark);
+    const activate = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const key = mark.dataset.findingId;
+      if (key) selectFinding(key, { scrollPreview: false, focusFinding: true });
+    };
+    mark.addEventListener('click', activate);
+    mark.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') activate(event);
+    });
+  };
 
-  for (const mark of sourceDocument.querySelectorAll('mark.norman-source-finding[data-finding-id]')) {
+  for (const mark of sourceDocument.querySelectorAll('button.norman-source-finding[data-finding-id]')) {
     const key = mark.dataset.findingId;
     const finding = findingsByKey.get(key);
     if (!finding) {
       mark.replaceWith(...mark.childNodes);
       continue;
     }
+    bindFindingActivation(mark);
     existingKeys.add(key);
     mark.dataset.confidence = findingConfidenceLevel(finding);
     mark.classList.toggle('is-followed', key === state.selectedId);
@@ -1387,14 +1274,15 @@ function syncPageFrameHighlights(sourceDocument = ui.pageFrame.contentDocument) 
     const range = findPreviewRange(sourceDocument, finding.excerpt, occurrence);
     if (!range) continue;
 
-    const highlight = sourceDocument.createElement('mark');
+    const highlight = sourceDocument.createElement('button');
+    highlight.type = 'button';
     highlight.className = 'norman-source-finding';
     highlight.dataset.findingId = key;
     highlight.dataset.confidence = findingConfidenceLevel(finding);
     highlight.tabIndex = 0;
-    highlight.setAttribute('role', 'button');
     highlight.setAttribute('aria-label', `Показать сигнал: ${finding.title || finding.ruleTitle || 'найденный фрагмент'}`);
     highlight.classList.toggle('is-followed', key === state.selectedId);
+    bindFindingActivation(highlight);
     highlight.append(range.extractContents());
     range.insertNode(highlight);
   }
@@ -1409,7 +1297,7 @@ function scrollPageFindingIntoView(key) {
     return;
   }
   if (!sourceDocument?.body) return;
-  const mark = Array.from(sourceDocument.querySelectorAll('mark.norman-source-finding[data-finding-id]'))
+  const mark = Array.from(sourceDocument.querySelectorAll('button.norman-source-finding[data-finding-id]'))
     .find((candidate) => candidate.dataset.findingId === key);
   if (!mark) return;
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -1434,19 +1322,62 @@ function markPageFrameReady(url, documentRef, loadToken) {
     if (!sourceDocument?.body) return;
     if (pageFrameBoundDocument !== sourceDocument) {
       pageFrameBoundDocument = sourceDocument;
+      let sourcePointerGesture = null;
+      let lastSourcePointerGesture = null;
+      const sourceFindingFromEvent = (event) => {
+        const selector = 'button.norman-source-finding[data-finding-id]';
+        return event.composedPath?.().find((target) => target?.matches?.(selector))
+          || event.target?.closest?.(selector)
+          || null;
+      };
+      sourceDocument.addEventListener('pointerdown', (event) => {
+        const mark = sourceFindingFromEvent(event);
+        sourcePointerGesture = mark && event.button === 0
+          ? { pointerId: event.pointerId, mark, x: event.clientX, y: event.clientY, maxDistance: 0 }
+          : null;
+      }, { capture: true });
+      sourceDocument.addEventListener('pointermove', (event) => {
+        if (!sourcePointerGesture || sourcePointerGesture.pointerId !== event.pointerId) return;
+        const distance = Math.hypot(event.clientX - sourcePointerGesture.x, event.clientY - sourcePointerGesture.y);
+        sourcePointerGesture.maxDistance = Math.max(sourcePointerGesture.maxDistance, distance);
+      }, { capture: true });
+      sourceDocument.addEventListener('pointerup', (event) => {
+        const gesture = sourcePointerGesture;
+        sourcePointerGesture = null;
+        if (!gesture || gesture.pointerId !== event.pointerId) return;
+        const mark = sourceFindingFromEvent(event);
+        if (mark !== gesture.mark) return;
+        const key = mark.dataset.findingId;
+        const activated = gesture.maxDistance <= 5;
+        lastSourcePointerGesture = { key, maxDistance: gesture.maxDistance, activated, at: performance.now() };
+        if (activated) selectFinding(key, { scrollPreview: false, focusFinding: true });
+      }, { capture: true });
       sourceDocument.addEventListener('click', (event) => {
-        const selector = 'mark.norman-source-finding[data-finding-id]';
-        const mark = event.composedPath?.().find((target) => target?.matches?.(selector))
-          || event.target?.closest?.(selector);
+        const mark = sourceFindingFromEvent(event);
         if (mark) {
           event.preventDefault();
-          selectFinding(mark.dataset.findingId, { scrollPreview: false, focusFinding: true });
+          event.stopPropagation();
+          const key = mark.dataset.findingId;
+          const pointerGesture = lastSourcePointerGesture;
+          if (pointerGesture && performance.now() - pointerGesture.at < 500) {
+            lastSourcePointerGesture = null;
+            if (pointerGesture.key === key && (pointerGesture.maxDistance > 5 || pointerGesture.activated)) return;
+          }
+          if (pointerGesture && performance.now() - pointerGesture.at >= 500) {
+            lastSourcePointerGesture = null;
+          }
+          selectFinding(key, { scrollPreview: false, focusFinding: true });
           return;
         }
         if (event.target?.closest?.('a[href]')) event.preventDefault();
       }, { capture: true });
+      sourceDocument.addEventListener('focusin', (event) => {
+        const mark = sourceFindingFromEvent(event);
+        if (!mark || !mark.dataset.findingId || mark.dataset.findingId === state.selectedId) return;
+        selectFinding(mark.dataset.findingId, { scrollPreview: false, focusFinding: true });
+      }, { capture: true });
       sourceDocument.addEventListener('keydown', (event) => {
-        const mark = event.target?.closest?.('mark.norman-source-finding[data-finding-id]');
+        const mark = event.target?.closest?.('button.norman-source-finding[data-finding-id]');
         if (!mark || (event.key !== 'Enter' && event.key !== ' ')) return;
         event.preventDefault();
         selectFinding(mark.dataset.findingId, { scrollPreview: false, focusFinding: true });
@@ -3076,22 +3007,31 @@ function renderAiReviewDialog() {
       entry = document.createElement('li');
       entry.className = 'ai-review-chat-message ai-review-chat-review';
       entry.dataset.reviewNumber = String(reviewNumber);
-      const details = document.createElement('details');
+      const details = document.createElement('div');
       details.className = 'ai-review-chat-details';
-      details.open = false;
-      const detailsLabel = document.createElement('summary');
+      const detailsLabel = document.createElement('button');
+      detailsLabel.className = 'ai-review-chat-toggle';
+      detailsLabel.type = 'button';
       detailsLabel.textContent = 'Рассуждение';
+      detailsLabel.setAttribute('aria-expanded', 'false');
       const thought = document.createElement('div');
       thought.className = 'ai-review-chat-review-stream';
+      thought.id = `ai-review-thought-${reviewNumber}`;
+      thought.hidden = true;
+      detailsLabel.setAttribute('aria-controls', thought.id);
       thought.dataset.followLatest = 'true';
       thought.addEventListener('scroll', () => {
         const distanceToBottom = thought.scrollHeight - thought.clientHeight - thought.scrollTop;
         thought.dataset.followLatest = String(distanceToBottom <= 18);
       });
-      details.addEventListener('toggle', () => {
-        if (details.open && thought.dataset.followLatest !== 'false') {
+      detailsLabel.addEventListener('click', () => {
+        const expanded = detailsLabel.getAttribute('aria-expanded') !== 'true';
+        detailsLabel.setAttribute('aria-expanded', String(expanded));
+        thought.hidden = !expanded;
+        if (expanded && thought.dataset.followLatest !== 'false') {
           requestAnimationFrame(() => {
-            if (details.open && thought.dataset.followLatest !== 'false') {
+            if (detailsLabel.getAttribute('aria-expanded') === 'true'
+              && thought.dataset.followLatest !== 'false') {
               thought.scrollTop = thought.scrollHeight;
             }
           });
@@ -3102,7 +3042,7 @@ function renderAiReviewDialog() {
       ui.aiReviewLiveMessages.append(entry);
     }
     const details = entry.querySelector('.ai-review-chat-details');
-    const detailsLabel = details.querySelector('summary');
+    const detailsLabel = details.querySelector('.ai-review-chat-toggle');
     const thought = entry.querySelector('.ai-review-chat-review-stream');
     const complete = Boolean(stream?.complete || update);
     detailsLabel.textContent = 'Рассуждение';
@@ -3139,7 +3079,7 @@ function renderAiReviewDialog() {
       thought.dataset.initialized = 'true';
     }
     thought.classList.toggle('is-streaming', !complete && Boolean(stream?.text));
-    thought.hidden = !stream?.text;
+    thought.hidden = detailsLabel.getAttribute('aria-expanded') !== 'true';
     let answer = entry.querySelector('.ai-review-chat-answer');
     if (!answer) {
       answer = document.createElement('div');
@@ -3200,7 +3140,7 @@ function openAiReviewResults() {
   const findings = state.findings.filter(isAiFinding);
   if (!findings.length) return;
 
-  ui.aiReviewResultsList.replaceChildren(...findings.map((finding) => {
+  ui.aiReviewResultsList.replaceChildren(...findings.map((finding, index) => {
     const data = findingRowData(finding);
     const confidence = aiConfidenceLevel(finding.aiConfidence);
     const item = document.createElement('li');
@@ -3225,12 +3165,23 @@ function openAiReviewResults() {
       : 'Возможный сигнал; требуется экспертная проверка.';
     result.append(resultLabel, decision);
 
-    const reasoning = document.createElement('details');
+    const reasoning = document.createElement('div');
     reasoning.className = 'ai-review-reasoning';
-    const summary = document.createElement('summary');
+    const summary = document.createElement('button');
+    summary.className = 'ai-review-chat-toggle';
+    summary.type = 'button';
     summary.textContent = 'Рассуждение';
+    summary.setAttribute('aria-expanded', 'false');
     const rationale = document.createElement('p');
     rationale.className = 'ai-review-rationale';
+    rationale.id = `ai-review-result-rationale-${index}`;
+    rationale.hidden = true;
+    summary.setAttribute('aria-controls', rationale.id);
+    summary.addEventListener('click', () => {
+      const expanded = summary.getAttribute('aria-expanded') !== 'true';
+      summary.setAttribute('aria-expanded', String(expanded));
+      rationale.hidden = !expanded;
+    });
     rationale.textContent = (confidence === 'likely-false' && finding.aiRejectionReason)
       || finding.aiRationale
       || 'Рассуждение не сохранено.';
@@ -3536,7 +3487,15 @@ function renderFindings() {
   const rejected = entries.filter(({ confidence }) => confidence === 'likely-false');
   const visible = entries.filter(({ confidence }) => confidence !== 'likely-false');
   ui.resultCount.textContent = state.analysis === 'idle' && !state.document ? '—' : String(visible.length);
-  ui.exportReportPdf.hidden = !(codexSettings.enabled && state.aiAnalysis === 'done' && state.document);
+  const aiReviewInProgress = state.aiAnalysis === 'checking' || state.aiAnalysis === 'running';
+  const reportAvailable = Boolean(state.document)
+    && state.analysis === 'done'
+    && !aiReviewInProgress;
+  ui.exportReportPdf.hidden = !reportAvailable;
+  if (!reportAvailable) {
+    ui.reportExportStatus.hidden = true;
+    ui.reportExportStatus.textContent = '';
+  }
   const statuses = findingVerificationStatuses(entries);
   const orderSignature = JSON.stringify([visible.map(({ key }) => key), rejected.map(({ key }) => key)]);
   const orderChanged = orderSignature !== renderedFindingsOrderSignature;
@@ -4245,14 +4204,36 @@ if (isTauri) {
 }
 
 ui.newDocument.addEventListener('click', startNewTab);
-ui.exportReportPdf.addEventListener('click', () => {
-  if (!codexSettings.enabled || state.aiAnalysis !== 'done' || !state.document) return;
-  const reportFindings = state.findings.filter((finding) => findingConfidenceLevel(finding) !== 'likely-false');
+ui.exportReportPdf.addEventListener('click', async () => {
+  const aiReviewInProgress = state.aiAnalysis === 'checking' || state.aiAnalysis === 'running';
+  if (!state.document || state.analysis !== 'done' || aiReviewInProgress) return;
+  const reportDocument = { ...state.document };
+  const reportFindings = state.findings
+    .filter((finding) => findingConfidenceLevel(finding) !== 'likely-false')
+    .map((finding) => ({ ...finding }));
+  ui.exportReportPdf.disabled = true;
+  ui.reportExportStatus.hidden = false;
+  ui.reportExportStatus.classList.remove('is-success', 'is-error');
+  ui.reportExportStatus.textContent = 'Подготавливаем PDF-отчёт…';
   try {
-    generateReportPdf(state.document, reportFindings);
+    const { downloadReportPdf, generateReportPdf } = await import('./report-pdf.js');
+    const { bytes, fileName } = await generateReportPdf(reportDocument, reportFindings);
+    if (isTauri) {
+      const path = await invoke('save_report_pdf', {
+        title: reportDocument.title || 'Документ без названия',
+        bytes: Array.from(bytes),
+      });
+      ui.reportExportStatus.textContent = `PDF сохранён: ${path}`;
+    } else {
+      downloadReportPdf(bytes, fileName);
+      ui.reportExportStatus.textContent = `PDF скачан: ${fileName}. Папку «Загрузки» выбирает браузер.`;
+    }
+    ui.reportExportStatus.classList.add('is-success');
   } catch (error) {
-    state.loadError = messageFrom(error);
-    renderError();
+    ui.reportExportStatus.textContent = `Не удалось сохранить PDF: ${messageFrom(error)}`;
+    ui.reportExportStatus.classList.add('is-error');
+  } finally {
+    ui.exportReportPdf.disabled = false;
   }
 });
 ui.openAppInfo.addEventListener('click', () => {
@@ -4284,14 +4265,9 @@ ui.ollamaSetupDialog.addEventListener('cancel', (event) => {
   if (ui.closeOllamaSetup.disabled || ollamaInstallInProgress) event.preventDefault();
 });
 ui.closeWelcome.addEventListener('click', closeWelcome);
-ui.openWelcome.addEventListener('click', () => void showWelcome(true));
+ui.openWelcome.addEventListener('click', () => showWelcome(true));
 ui.continueWithoutAi.addEventListener('click', closeWelcome);
 ui.welcomeOpenSettings.addEventListener('click', openSettingsFromWelcome);
-ui.welcomeModel.addEventListener('change', renderWelcomeModelNote);
-ui.welcomeInstallOllama.addEventListener('click', () => {
-  if (welcomeInstallComplete) openSettingsFromWelcome();
-  else void installOllamaFromWelcome();
-});
 ui.welcomeDialog.addEventListener('click', (event) => {
   if (event.target === ui.welcomeDialog) closeWelcome();
 });

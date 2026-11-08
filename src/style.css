@@ -263,12 +263,16 @@ select:focus-visible,
 }
 
 html.macos-titlebar-overlay .app-bar {
-  min-height: 56px;
+  min-height: 50px;
   padding-left: 88px;
 }
 
+html.macos-titlebar-overlay .app-tab-list {
+  height: 50px;
+}
+
 html.macos-titlebar-overlay .header-actions {
-  top: 12px;
+  top: 9px;
 }
 
 .app-tab-list {
@@ -895,71 +899,6 @@ main {
   font-size: 12px;
 }
 
-.welcome-ollama {
-  width: 100%;
-  display: grid;
-  gap: 7px;
-  padding: 13px 14px;
-  background: var(--surface-raised);
-  border: 1px solid var(--line-soft);
-  border-radius: 9px;
-  text-align: left;
-}
-
-.welcome-ollama[hidden] {
-  display: none;
-}
-
-.welcome-ollama h3 {
-  margin: 0;
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.welcome-ollama p {
-  font-size: 12px;
-}
-
-.welcome-model-field {
-  display: grid;
-  gap: 6px;
-  color: var(--muted-strong);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.welcome-model-field .modal-input {
-  height: 40px;
-  font-size: 12px;
-}
-
-.welcome-ollama .welcome-model-note,
-.welcome-ollama .welcome-installer-note,
-.welcome-ollama .welcome-install-status {
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.welcome-progress {
-  width: 100%;
-  height: 8px;
-  accent-color: var(--accent);
-}
-
-.welcome-progress[hidden],
-.welcome-install-status[hidden] {
-  display: none;
-}
-
-.welcome-install-status[data-state="error"] {
-  color: var(--text-error);
-}
-
-.welcome-install-status[data-state="ready"] {
-  color: var(--text-inline-success);
-}
-
 .welcome-actions {
   width: 100%;
   display: flex;
@@ -1153,18 +1092,20 @@ main {
   min-width: 0;
 }
 
-.ai-review-chat-details > summary {
+.ai-review-chat-toggle {
   min-height: 28px;
   display: flex;
   align-items: center;
   gap: 9px;
   padding: 4px 0;
   color: var(--muted-strong);
+  background: transparent;
+  border: 0;
   font-size: 12px;
   font-weight: 600;
   line-height: 1.4;
   cursor: pointer;
-  list-style: none;
+  text-align: left;
 }
 
 .ai-review-chat-duration {
@@ -1176,11 +1117,7 @@ main {
   white-space: nowrap;
 }
 
-.ai-review-chat-details > summary::-webkit-details-marker {
-  display: none;
-}
-
-.ai-review-chat-details > summary::before {
+.ai-review-chat-toggle::before {
   width: 7px;
   height: 7px;
   flex: 0 0 7px;
@@ -1191,11 +1128,11 @@ main {
   transition: transform 140ms ease-out;
 }
 
-.ai-review-chat-details[open] > summary::before {
+.ai-review-chat-toggle[aria-expanded="true"]::before {
   transform: rotate(135deg);
 }
 
-.ai-review-chat-details > summary:focus-visible {
+.ai-review-chat-toggle:focus-visible {
   border-radius: 3px;
   outline: 2px solid var(--focus);
   outline-offset: 3px;
@@ -1328,7 +1265,7 @@ main {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ai-review-chat-details > summary::before,
+  .ai-review-chat-toggle::before,
   .ai-review-markdown-enter {
     animation: none;
     transition: none;
@@ -2508,6 +2445,22 @@ p {
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 1.7;
+}
+
+.report-export-status {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.report-export-status.is-success {
+  color: var(--text-inline-success);
+}
+
+.report-export-status.is-error {
+  color: var(--text-inline-error);
 }
 
 .confidence-legend {

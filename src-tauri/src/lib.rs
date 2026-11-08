@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     env, fs::{self, File},
-    io::{Cursor, Read},
+    io::{Cursor, Read, Write},
     path::Path,
     process::{Command, Stdio},
     sync::{Arc, Condvar, Mutex, OnceLock},
@@ -31,6 +31,7 @@ const MAX_FINDINGS: usize = 500;
 const MAX_FINDINGS_PER_RULE: usize = 40;
 const MAX_PARALLEL_PROCESSES: usize = 4;
 const MAX_ANALYSIS_ID_BYTES: usize = 256;
+const MAX_REPORT_PDF_BYTES: usize = 64 * 1024 * 1024;
 const RULES_JSON: &str = include_str!("../../data/rules.json");
 
 pub(crate) fn normalize_parallel_processes(value: Option<serde_json::Value>) -> usize {
@@ -349,6 +350,76 @@ async fn load_url(url: String) -> Result<LoadedDocument, String> {
 }
 
 #[tauri::command]
+fn save_report_pdf(title: String, bytes: Vec<u8>, app: tauri::AppHandle) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err("Не удалось создать PDF-отчёт: файл пуст.".into());
+    }
+    if bytes.len() > MAX_REPORT_PDF_BYTES {
+        return Err("PDF-отчёт превышает допустимый размер.".into());
+    }
+
+    let downloads_dir = app
+        .path()
+        .download_dir()
+        .map_err(|error| format!("Не удалось определить папку «Загрузки»: {error}"))?;
+    fs::create_dir_all(&downloads_dir)
+        .map_err(|error| format!("Не удалось открыть папку «Загрузки»: {error}"))?;
+
+    let safe_title = title
+        .chars()
+        .filter_map(|character| {
+            if character.is_alphanumeric() {
+                Some(character)
+            } else if character.is_whitespace() || matches!(character, '-' | '_') {
+                Some('-')
+            } else {
+                None
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+        .chars()
+        .take(80)
+        .collect::<String>();
+    let safe_title = if safe_title.is_empty() {
+        "Документ"
+    } else {
+        &safe_title
+    };
+    let stem = format!("Отчёт-Норман-АЭ-{safe_title}");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    for suffix in 0..10_000_u32 {
+        let file_name = if suffix == 0 {
+            format!("{stem}-{timestamp}.pdf")
+        } else {
+            format!("{stem}-{timestamp}-{}.pdf", suffix + 1)
+        };
+        let path = downloads_dir.join(file_name);
+        let mut file = match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Не удалось сохранить PDF в «Загрузки»: {error}")),
+        };
+
+        if let Err(error) = file.write_all(&bytes) {
+            drop(file);
+            let _ = fs::remove_file(&path);
+            return Err(format!("Не удалось записать PDF в «Загрузки»: {error}"));
+        }
+        return Ok(path.to_string_lossy().into_owned());
+    }
+
+    Err("Не удалось подобрать имя файла для PDF-отчёта.".into())
+}
+
+#[tauri::command]
 fn get_system_memory_bytes() -> Result<u64, String> {
     system_memory_bytes()
 }
@@ -502,6 +573,7 @@ pub fn run() {
             cancel_ai_analysis,
             get_rule_catalog,
             get_system_memory_bytes,
+            save_report_pdf,
             codex::get_codex_status,
             codex::analyze_with_codex,
             codex::get_claude_status,

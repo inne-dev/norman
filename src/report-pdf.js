@@ -1,15 +1,18 @@
+import pdfMake from 'pdfmake/build/pdfmake.js';
+import pdfFonts from 'pdfmake/build/vfs_fonts.js';
 import { isRejectedFinding } from './finding-confidence.js';
 
 const REPORT_NOTE = 'Сформировано программой «Норман АЭ». Не является экспертным заключением.';
 
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replace(/&/gu, '&amp;')
-    .replace(/</gu, '&lt;')
-    .replace(/>/gu, '&gt;')
-    .replace(/"/gu, '&quot;')
-    .replace(/'/gu, '&#39;');
-}
+pdfMake.vfs = pdfFonts;
+pdfMake.fonts = {
+  Roboto: {
+    normal: 'Roboto-Regular.ttf',
+    bold: 'Roboto-Medium.ttf',
+    italics: 'Roboto-Italic.ttf',
+    bolditalics: 'Roboto-MediumItalic.ttf',
+  },
+};
 
 function textValue(value, fallback = 'Не указано') {
   return typeof value === 'string' && value.trim() ? value : fallback;
@@ -61,107 +64,120 @@ function excerptFrom(documentData, finding) {
   return 'Точная цитата не сохранена';
 }
 
-function proposalFrom(finding) {
-  return textValue(
-    finding.expertProposal
-      || finding.expert_proposal
-      || finding.proposal
-      || finding.recommendation,
-  );
-}
-
 function reportRows(documentData, findings) {
   if (!findings.length) {
-    return '<tr><td class="empty" colspan="5">Для этого документа сигналы не сохранены.</td></tr>';
+    return [[
+      {
+        text: 'Для этого документа сигналы не сохранены.',
+        colSpan: 4,
+        alignment: 'center',
+        color: '#53636c',
+      },
+      {},
+      {},
+      {},
+    ]];
   }
 
-  return findings.map((finding) => {
-    const ruleId = textValue(finding.ruleId, 'ID правила не указан');
-    const factor = textValue(finding.factor || finding.title, 'Фактор не указан');
-    return `<tr>
-      <td>${escapeHtml(locationFromText(documentData.text || '', finding))}</td>
-      <td class="excerpt">${escapeHtml(excerptFrom(documentData, finding))}</td>
-      <td><span class="rule-id">${escapeHtml(ruleId)}</span>${escapeHtml(factor)}</td>
-      <td>${escapeHtml(textValue(finding.aiRationale))}</td>
-      <td>${escapeHtml(proposalFrom(finding))}</td>
-    </tr>`;
-  }).join('');
+  return findings.map((finding) => [
+    locationFromText(documentData.text || '', finding),
+    excerptFrom(documentData, finding),
+    [
+      { text: `${textValue(finding.ruleId, 'ID правила не указан')}\n`, style: 'ruleId' },
+      textValue(finding.factor || finding.title, 'Фактор не указан'),
+    ],
+    textValue(finding.aiRationale),
+  ]);
 }
 
-function reportHtml(documentData, findings) {
+function reportDefinition(documentData, findings) {
   const title = textValue(documentData.title, 'Документ без названия');
   const source = textValue(documentData.url, 'Источник: локальный документ');
   const created = new Date().toLocaleString('ru-RU');
 
-  return `<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Отчёт Норман АЭ — ${escapeHtml(title)}</title>
-  <style>
-    @page { size: A4 landscape; margin: 12mm; }
-    * { box-sizing: border-box; }
-    html { color-scheme: light; }
-    body { margin: 0; color: #1d2830; background: #fff; font: 10pt/1.42 Arial, "Helvetica Neue", sans-serif; }
-    main { max-width: 1600px; margin: 0 auto; padding: 22px; }
-    h1 { margin: 0 0 5px; font-size: 19pt; line-height: 1.2; font-weight: 650; }
-    .source, .created { margin: 3px 0; color: #53636c; font-size: 9pt; overflow-wrap: anywhere; }
-    .note { margin: 15px 0 12px; padding: 8px 10px; border: 1px solid #c8d2d7; background: #f4f7f8; font-weight: 600; }
-    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-    col.location { width: 15%; }
-    col.excerpt { width: 27%; }
-    col.factor { width: 18%; }
-    col.rationale { width: 21%; }
-    col.proposal { width: 19%; }
-    thead { display: table-header-group; }
-    th, td { padding: 7px; border: 1px solid #c8d2d7; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
-    th { background: #eaf0f2; color: #26353d; font-size: 8.5pt; font-weight: 700; }
-    tr { break-inside: avoid; page-break-inside: avoid; }
-    .excerpt { white-space: pre-wrap; }
-    .rule-id { display: block; margin-bottom: 3px; color: #53636c; font-size: 8pt; font-weight: 700; }
-    .empty { padding: 18px; text-align: center; color: #53636c; }
-    @media screen {
-      body { background: #e9edef; }
-      main { min-height: 100vh; background: #fff; box-shadow: 0 2px 18px #17232a18; }
-    }
-    @media print {
-      body { font-size: 8.5pt; }
-      main { max-width: none; padding: 0; }
-      th, td { padding: 5px; }
-    }
-  </style>
-</head>
-<body>
-  <main>
-    <h1>${escapeHtml(title)}</h1>
-    <p class="source">${escapeHtml(source)}</p>
-    <p class="created">Отчёт подготовлен: ${escapeHtml(created)} · Сигналов: ${findings.length}</p>
-    <p class="note">${REPORT_NOTE}</p>
-    <table aria-label="Таблица сигналов первичного анализа">
-      <colgroup><col class="location"><col class="excerpt"><col class="factor"><col class="rationale"><col class="proposal"></colgroup>
-      <thead><tr>
-        <th scope="col">Местоположение в акте</th>
-        <th scope="col">Точная цитата</th>
-        <th scope="col">Фактор / ID правила</th>
-        <th scope="col">Обоснование ИИ</th>
-        <th scope="col">Предложение эксперту</th>
-      </tr></thead>
-      <tbody>${reportRows(documentData, findings)}</tbody>
-    </table>
-  </main>
-</body>
-</html>`;
+  return {
+    pageSize: 'A4',
+    pageOrientation: 'landscape',
+    pageMargins: [28, 30, 28, 36],
+    info: {
+      title: `Отчёт Норман АЭ — ${title}`,
+      author: 'Норман АЭ',
+      subject: 'Результаты первичного анализа',
+    },
+    defaultStyle: {
+      font: 'Roboto',
+      fontSize: 8,
+      lineHeight: 1.25,
+      color: '#1d2830',
+    },
+    content: [
+      { text: title, style: 'title' },
+      { text: source, style: 'meta' },
+      { text: `Отчёт подготовлен: ${created} · Сигналов: ${findings.length}`, style: 'meta' },
+      { text: REPORT_NOTE, style: 'note' },
+      {
+        table: {
+          headerRows: 1,
+          widths: [90, 170, 120, 340],
+          body: [
+            [
+              'Местоположение в акте',
+              'Точная цитата',
+              'Фактор / ID правила',
+              'Обоснование ИИ',
+            ].map((text) => ({ text, style: 'tableHeader' })),
+            ...reportRows(documentData, findings),
+          ],
+        },
+        layout: {
+          hLineColor: () => '#c8d2d7',
+          vLineColor: () => '#c8d2d7',
+          hLineWidth: () => 0.6,
+          vLineWidth: () => 0.6,
+          paddingLeft: () => 5,
+          paddingRight: () => 5,
+          paddingTop: () => 5,
+          paddingBottom: () => 5,
+          fillColor: (rowIndex) => (rowIndex === 0 ? '#eaf0f2' : null),
+        },
+      },
+    ],
+    styles: {
+      title: { fontSize: 17, bold: true, margin: [0, 0, 0, 5] },
+      meta: { fontSize: 8, color: '#53636c', margin: [0, 2, 0, 0], characterSpacing: 0.05 },
+      note: { fontSize: 8, bold: true, fillColor: '#f4f7f8', margin: [0, 10, 0, 10] },
+      tableHeader: { fontSize: 8, bold: true, color: '#26353d' },
+      ruleId: { fontSize: 7, bold: true, color: '#53636c' },
+    },
+    footer: (currentPage, pageCount) => ({
+      text: `${currentPage} / ${pageCount}`,
+      alignment: 'right',
+      margin: [0, 8, 28, 0],
+      fontSize: 7,
+      color: '#53636c',
+    }),
+  };
 }
 
-/** Open native print dialog; choose “Save as PDF” to export the report. */
-export function generateReportPdf(documentData, findings = []) {
+function reportFileName(title) {
+  const safeTitle = textValue(title, 'Документ')
+    .normalize('NFKC')
+    .replace(/[^\p{L}\p{N}_ -]/gu, '')
+    .trim()
+    .replace(/\s+/gu, '-')
+    .slice(0, 80);
+  return `Отчёт-Норман-АЭ-${safeTitle || 'Документ'}.pdf`;
+}
+
+/** Build a PDF buffer. The caller chooses the native or browser download destination. */
+export async function generateReportPdf(documentData, findings = []) {
   if (!documentData || typeof documentData !== 'object') {
     throw new TypeError('Для отчёта нужен объект документа.');
   }
   if (!Array.isArray(findings)) {
     throw new TypeError('Список сигналов должен быть массивом.');
   }
+
   const safeDocument = {
     title: textValue(documentData.title, 'Документ без названия'),
     url: typeof documentData.url === 'string' ? documentData.url : '',
@@ -170,53 +186,29 @@ export function generateReportPdf(documentData, findings = []) {
   const safeFindings = findings.filter((finding) => (
     finding && typeof finding === 'object' && !isRejectedFinding(finding)
   ));
-  let reportWindow = null;
-  try {
-    reportWindow = window.open('', '_blank');
-  } catch {
-    // Desktop WebViews can reject popup creation; print through an iframe instead.
-  }
-  if (reportWindow) {
-    reportWindow.opener = null;
-    reportWindow.document.open();
-    reportWindow.document.write(reportHtml(safeDocument, safeFindings));
-    reportWindow.document.close();
-  } else {
-    const frame = document.createElement('iframe');
-    frame.title = 'Отчёт для экспорта в PDF';
-    frame.tabIndex = -1;
-    frame.setAttribute('aria-hidden', 'true');
-    frame.style.cssText = 'position:fixed;left:-10000px;top:0;width:1px;height:1px;border:0';
-    document.body.append(frame);
-
-    const frameWindow = frame.contentWindow;
-    if (!frameWindow) {
-      frame.remove();
-      throw new Error('Не удалось подготовить отчёт к печати.');
-    }
-
-    const cleanup = () => frame.remove();
-    frameWindow.addEventListener('afterprint', cleanup, { once: true });
+  const buffer = await new Promise((resolve, reject) => {
     try {
-      frameWindow.document.open();
-      frameWindow.document.write(reportHtml(safeDocument, safeFindings));
-      frameWindow.document.close();
+      pdfMake.createPdf(reportDefinition(safeDocument, safeFindings)).getBuffer(resolve);
     } catch (error) {
-      cleanup();
-      throw error;
+      reject(error);
     }
-    frameWindow.setTimeout(cleanup, 60_000);
-    try {
-      frameWindow.focus();
-      frameWindow.print();
-    } catch (error) {
-      cleanup();
-      throw error;
-    }
-    return frameWindow;
-  }
+  });
+  const bytes = new Uint8Array(buffer);
+  return {
+    bytes,
+    fileName: reportFileName(safeDocument.title),
+  };
+}
 
-  reportWindow.focus();
-  reportWindow.setTimeout(() => reportWindow.print(), 250);
-  return reportWindow;
+export function downloadReportPdf(bytes, fileName) {
+  const blob = new Blob([bytes], { type: 'application/pdf' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  link.hidden = true;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
