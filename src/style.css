@@ -409,7 +409,7 @@ html.macos-titlebar-overlay .header-actions {
 .header-actions {
   position: fixed;
   z-index: 5;
-  top: 8px;
+  top: 4px;
   right: clamp(22px, 2vw, 36px);
   max-width: calc(100vw - 32px);
   display: flex;
@@ -3141,11 +3141,12 @@ p {
   opacity: 0;
   pointer-events: none;
   transform: translateX(-80%) skewX(-18deg);
+  transition: opacity 180ms ease-out;
 }
 
 .finding-card[data-verify-status="active"] .finding-summary::before {
   opacity: 1;
-  animation: finding-light-sweep 2.2s linear infinite;
+  animation: finding-light-sweep 2.4s linear infinite;
 }
 
 :root[data-theme="light"] .finding-card[data-verify-status="active"] .finding-summary::before {
@@ -3160,14 +3161,18 @@ p {
 }
 
 @keyframes finding-light-sweep {
-  from { transform: translateX(-80%) skewX(-18deg); }
-  to { transform: translateX(80%) skewX(-18deg); }
+  0% { opacity: 0; transform: translateX(-100%) skewX(-18deg); }
+  12% { opacity: 0.32; }
+  50% { opacity: 0.72; transform: translateX(0) skewX(-18deg); }
+  88% { opacity: 0.32; }
+  100% { opacity: 0; transform: translateX(100%) skewX(-18deg); }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .finding-card[data-verify-status="active"] .finding-summary::before {
     animation: none;
-    transform: translateX(-80%) skewX(-18deg);
+    opacity: 0.18;
+    transform: translateX(0) skewX(-18deg);
   }
 }
 
@@ -3360,7 +3365,7 @@ p {
   }
 
   .header-actions {
-    top: 4px;
+    top: 2px;
     right: 16px;
   }
 
