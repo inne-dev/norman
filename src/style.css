@@ -459,15 +459,27 @@ html.macos-titlebar-overlay .header-actions {
 .header-ai-status {
   min-width: 0;
   max-width: min(160px, calc(100vw - 180px));
+  height: 32px;
   flex: 0 1 auto;
   display: none;
   align-items: center;
   gap: 6px;
+  padding: 0 6px;
   color: var(--muted-strong);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
   font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
-  cursor: default;
+  cursor: pointer;
+  transition: color 140ms ease-out, background-color 140ms ease-out, border-color 140ms ease-out;
+}
+
+.header-ai-status:hover {
+  color: var(--text);
+  background: var(--surface-active);
+  border-color: var(--line-control);
 }
 
 .header-ai-status:not([hidden]) {
@@ -1181,12 +1193,6 @@ main {
   outline-offset: 3px;
 }
 
-.ai-review-chat-review-summary {
-  margin: 0;
-  padding: 0 0 8px 16px;
-  animation: ai-review-message-in 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
 .ai-review-chat-review-stream {
   max-width: min(72ch, 100%);
   max-height: 320px;
@@ -1313,13 +1319,8 @@ main {
   animation: ai-review-stream-caret 900ms steps(2, jump-none) infinite;
 }
 
-.ai-review-chat-details:not([open]) > .ai-review-chat-review-summary {
-  display: none;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .ai-review-chat-details > summary::before,
-  .ai-review-chat-review-summary,
   .ai-review-markdown-enter {
     animation: none;
     transition: none;
@@ -1473,6 +1474,18 @@ main {
   gap: 10px;
 }
 
+.settings-modal.ai-only .settings-theme,
+.settings-modal.ai-only .settings-analysis,
+.settings-modal.ai-only .settings-preview {
+  display: none;
+}
+
+.settings-modal.ai-only .settings-codex {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
 .ollama-setup {
   display: grid;
   gap: 8px;
@@ -1515,8 +1528,19 @@ main {
   justify-self: stretch;
 }
 
-.ollama-recommendation-button {
-  justify-self: start;
+.ollama-status-row {
+  flex-wrap: wrap;
+}
+
+.ollama-status-row #ollamaStatus {
+  flex: 1 1 100%;
+}
+
+.ollama-status-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .ollama-setup .ollama-setup-memory {
@@ -1708,6 +1732,77 @@ main {
   font-size: 11px;
 }
 
+.ai-provider-model-control {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ai-provider-model-control > .custom-select {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ai-provider-model-control .custom-select-trigger {
+  width: 100%;
+}
+
+.ai-provider-check-button {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: var(--muted-strong);
+  background: var(--surface-inset);
+  border: 1px solid var(--line-input);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.ai-provider-check-button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-tag);
+}
+
+.ai-provider-check-button:disabled {
+  cursor: not-allowed;
+}
+
+.ai-provider-check-button.is-checking:disabled {
+  cursor: wait;
+}
+
+.ai-provider-check-button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ai-provider-check-button.is-checking svg {
+  animation: provider-check-spin 900ms linear infinite;
+}
+
+@keyframes provider-check-spin {
+  to { transform: rotate(360deg); }
+}
+
+.ai-provider-check-button[hidden] {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-provider-check-button.is-checking svg {
+    animation: none;
+  }
+}
+
 .ollama-address-control {
   position: relative;
   display: block;
@@ -1716,10 +1811,6 @@ main {
 
 .ollama-address-control .modal-input {
   padding-right: 38px;
-}
-
-.ollama-address-control[data-state="ready"] .modal-input {
-  border-color: var(--text-inline-success);
 }
 
 .ollama-address-check {
@@ -1940,6 +2031,12 @@ main {
   flex: 0 0 auto;
   padding: 0 10px;
   font-size: 11px;
+}
+
+.ollama-model-field .ollama-recommendation-button {
+  justify-self: start;
+  padding: 0 8px;
+  font-size: 10px;
 }
 
 .modal-card {

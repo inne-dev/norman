@@ -134,6 +134,8 @@ const ui = {
   welcomeProgress: document.querySelector('#welcomeProgress'),
   welcomeInstallStatus: document.querySelector('#welcomeInstallStatus'),
   settingsDialog: document.querySelector('#settingsDialog'),
+  settingsTitle: document.querySelector('#settingsTitle'),
+  aiSettingsGroup: document.querySelector('#aiSettingsGroup'),
   closeSettings: document.querySelector('#closeSettings'),
   openOllamaSetup: document.querySelector('#openOllamaSetup'),
   ollamaSetupDialog: document.querySelector('#ollamaSetupDialog'),
@@ -348,8 +350,8 @@ function renderHeaderAiStatus() {
     aiProviderLabel(codexSettings.provider),
     ...(reasoning ? [`Уровень рассуждения: ${reasoning}`] : []),
   ];
-  ui.headerAiStatus.title = description.join(' · ');
-  ui.headerAiStatus.setAttribute('aria-label', description.join('. '));
+  ui.headerAiStatus.title = `Открыть настройки ИИ · ${description.join(' · ')}`;
+  ui.headerAiStatus.setAttribute('aria-label', `Открыть настройки ИИ. ${description.join('. ')}`);
 }
 
 let sourceTargets = new Map();
@@ -437,13 +439,30 @@ function closeWelcome() {
   if (ui.welcomeDialog.open) ui.welcomeDialog.close();
 }
 
-function openSettingsFromWelcome() {
-  closeWelcome();
+function showSettingsDialog({ aiOnly = false, focusTarget = null } = {}) {
   syncCodexSettingsUI();
+  ui.settingsDialog.classList.toggle('ai-only', aiOnly);
+  ui.settingsTitle.textContent = aiOnly ? 'Настройки ИИ' : 'Настройки';
   ui.settingsDialog.showModal();
   if (codexSettings.provider === 'ollama') void prepareOllamaSettings();
   else if (codexSettings.enabled) void refreshSelectedAiProviderStatus();
-  requestAnimationFrame(() => ui.codexEnabled.focus());
+  if (focusTarget) {
+    requestAnimationFrame(() => {
+      if (aiOnly) {
+        const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        ui.aiSettingsGroup.scrollIntoView({
+          behavior: reducedMotion ? 'auto' : 'smooth',
+          block: 'start',
+        });
+      }
+      focusTarget.focus({ preventScroll: aiOnly });
+    });
+  }
+}
+
+function openSettingsFromWelcome() {
+  closeWelcome();
+  showSettingsDialog({ aiOnly: true, focusTarget: ui.codexEnabled });
 }
 
 function ollamaInstallerNote(selectedPlatform) {
@@ -1522,6 +1541,14 @@ function pluralFindings(count) {
   return count + ' сигналов';
 }
 
+function renderProviderCheckButton(button, { checking, disabled = checking, label, checkingLabel }) {
+  const title = checking ? `${checkingLabel}…` : label;
+  button.disabled = Boolean(disabled);
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.classList.toggle('is-checking', Boolean(checking));
+}
+
 function renderCodexStatus() {
   const available = codexStatus.checked && codexPayloadIsAvailable(codexStatus) && !codexStatus.checking;
   ui.codexModel.disabled = !available;
@@ -1548,8 +1575,11 @@ function renderCodexStatus() {
     ui.codexStatus.textContent = codexStatus.message || `Codex подключён${version}.`;
     ui.codexStatus.dataset.state = 'ready';
   }
-  ui.checkCodexStatus.disabled = Boolean(codexStatus.checking);
-  ui.checkCodexStatus.textContent = codexStatus.checking ? 'Проверяем…' : 'Проверить';
+  renderProviderCheckButton(ui.checkCodexStatus, {
+    checking: codexStatus.checking,
+    label: 'Проверить подключение Codex',
+    checkingLabel: 'Проверяем доступность Codex',
+  });
 }
 
 async function refreshCodexStatus() {
@@ -1621,8 +1651,12 @@ function renderClaudeStatus() {
     ui.claudeStatus.textContent = claudeStatus.message || `Claude Code подключён${version}.`;
     ui.claudeStatus.dataset.state = 'ready';
   }
-  ui.checkClaudeStatus.disabled = !isTauri || Boolean(claudeStatus.checking);
-  ui.checkClaudeStatus.textContent = claudeStatus.checking ? 'Проверяем…' : 'Проверить';
+  renderProviderCheckButton(ui.checkClaudeStatus, {
+    checking: claudeStatus.checking,
+    disabled: !isTauri || Boolean(claudeStatus.checking),
+    label: 'Проверить доступность Claude Code',
+    checkingLabel: 'Проверяем доступность Claude Code',
+  });
   customSelects.refresh();
 }
 
@@ -1676,7 +1710,6 @@ async function refreshClaudeStatus() {
 function renderOllamaStatus() {
   const models = ollamaStatus.models;
   const addressConnected = ollamaStatus.checked && ollamaStatus.available && !ollamaStatus.checking;
-  ui.ollamaAddressControl.dataset.state = addressConnected ? 'ready' : 'idle';
   ui.ollamaAddressCheck.hidden = !addressConnected;
   const selectedModel = models.includes(codexSettings.ollamaModel)
     ? codexSettings.ollamaModel
@@ -1710,10 +1743,12 @@ function renderOllamaStatus() {
   const canStartOllama = (isTauri || isBrowserOllamaDev)
     && ollamaStatus.installed
     && !ollamaStatus.available
+    && !ollamaStatus.checking
+    && !ollamaStarting
     && isDefaultOllamaBaseUrl(codexSettings.ollamaBaseUrl);
   ui.startOllama.hidden = !canStartOllama;
   ui.startOllama.disabled = ollamaStarting || ollamaStatus.checking;
-  ui.checkOllamaStatus.hidden = canStartOllama || ollamaStarting;
+  ui.checkOllamaStatus.hidden = ollamaStarting;
 
   if (ollamaStarting && !ollamaStatus.available) {
     ui.ollamaStatus.textContent = 'Запускаем Ollama…';
@@ -1732,15 +1767,15 @@ function renderOllamaStatus() {
   } else if (!ollamaStatus.available || ollamaStatus.error) {
     ui.ollamaStatus.textContent = ollamaStatus.message || 'Не удалось подключиться к Ollama.';
     ui.ollamaStatus.dataset.state = 'error';
-  } else if (!models.length) {
-    ui.ollamaStatus.textContent = ollamaStatus.message || 'Ollama доступна, установленные модели не найдены.';
-    ui.ollamaStatus.dataset.state = 'error';
   } else {
-    ui.ollamaStatus.textContent = ollamaStatus.message || `Подключено · моделей: ${models.length}`;
+    ui.ollamaStatus.textContent = 'Подключение успешно.';
     ui.ollamaStatus.dataset.state = 'ready';
   }
-  ui.checkOllamaStatus.disabled = Boolean(ollamaStatus.checking);
-  ui.checkOllamaStatus.textContent = ollamaStatus.checking ? 'Проверяем…' : 'Проверить';
+  renderProviderCheckButton(ui.checkOllamaStatus, {
+    checking: ollamaStatus.checking,
+    label: 'Проверить подключение Ollama',
+    checkingLabel: 'Проверяем подключение Ollama',
+  });
   renderOllamaSetup();
 }
 
@@ -2083,8 +2118,11 @@ function renderCloudRuStatus() {
     ui.cloudRuStatus.textContent = cloudRuStatus.message || `Подключено · моделей: ${models.length}`;
     ui.cloudRuStatus.dataset.state = 'ready';
   }
-  ui.checkCloudRuStatus.disabled = Boolean(cloudRuStatus.checking);
-  ui.checkCloudRuStatus.textContent = cloudRuStatus.checking ? 'Проверяем…' : 'Проверить';
+  renderProviderCheckButton(ui.checkCloudRuStatus, {
+    checking: cloudRuStatus.checking,
+    label: 'Проверить подключение Cloud.ru',
+    checkingLabel: 'Проверяем Cloud.ru',
+  });
 }
 
 function redactProviderSecret(message, secret = '') {
@@ -2208,8 +2246,11 @@ function renderYandexStatus() {
     ui.yandexStatus.textContent = yandexStatus.message || `Подключено · моделей: ${models.length}`;
     ui.yandexStatus.dataset.state = 'ready';
   }
-  ui.checkYandexStatus.disabled = Boolean(yandexStatus.checking);
-  ui.checkYandexStatus.textContent = yandexStatus.checking ? 'Проверяем…' : 'Проверить';
+  renderProviderCheckButton(ui.checkYandexStatus, {
+    checking: yandexStatus.checking,
+    label: 'Проверить подключение Yandex AI Studio',
+    checkingLabel: 'Проверяем Yandex AI Studio',
+  });
 }
 
 async function refreshYandexStatus() {
@@ -3039,7 +3080,7 @@ function renderAiReviewDialog() {
       details.className = 'ai-review-chat-details';
       details.open = false;
       const detailsLabel = document.createElement('summary');
-      detailsLabel.textContent = 'Рассуждение ИИ';
+      detailsLabel.textContent = 'Рассуждение';
       const thought = document.createElement('div');
       thought.className = 'ai-review-chat-review-stream';
       thought.dataset.followLatest = 'true';
@@ -3056,18 +3097,15 @@ function renderAiReviewDialog() {
           });
         }
       });
-      const summary = document.createElement('p');
-      summary.className = 'ai-review-chat-review-summary';
-      details.append(detailsLabel, thought, summary);
+      details.append(detailsLabel, thought);
       entry.append(details);
       ui.aiReviewLiveMessages.append(entry);
     }
     const details = entry.querySelector('.ai-review-chat-details');
     const detailsLabel = details.querySelector('summary');
     const thought = entry.querySelector('.ai-review-chat-review-stream');
-    const summary = entry.querySelector('.ai-review-chat-review-summary');
     const complete = Boolean(stream?.complete || update);
-    detailsLabel.textContent = complete ? 'Показать ход рассуждения' : 'Модель рассуждает';
+    detailsLabel.textContent = 'Рассуждение';
     const durationMs = activeTab?.aiReviewDurations.get(key)?.get(reviewNumber);
     if ((complete || failed) && Number.isFinite(durationMs)) {
       const elapsedSeconds = Math.max(1, Math.round(durationMs / 1000));
@@ -3102,9 +3140,6 @@ function renderAiReviewDialog() {
     }
     thought.classList.toggle('is-streaming', !complete && Boolean(stream?.text));
     thought.hidden = !stream?.text;
-    summary.textContent = update?.summary || '';
-    summary.hidden = !update?.summary;
-
     let answer = entry.querySelector('.ai-review-chat-answer');
     if (!answer) {
       answer = document.createElement('div');
@@ -3151,7 +3186,7 @@ function renderAiReviewDialog() {
   ui.aiReviewLiveTyping.hidden = verifyStatus !== 'active' || paused;
   const typingLabel = ui.aiReviewLiveTyping.querySelector('.ai-review-typing-label');
   if (reviewUpdates.length === 0) {
-    typingLabel.textContent = 'Модель готовит первую оценку';
+    typingLabel.textContent = 'Модель готовит оценку';
   } else {
     typingLabel.textContent = 'Модель завершает оценку';
   }
@@ -3193,7 +3228,7 @@ function openAiReviewResults() {
     const reasoning = document.createElement('details');
     reasoning.className = 'ai-review-reasoning';
     const summary = document.createElement('summary');
-    summary.textContent = 'Рассуждение ИИ';
+    summary.textContent = 'Рассуждение';
     const rationale = document.createElement('p');
     rationale.className = 'ai-review-rationale';
     rationale.textContent = (confidence === 'likely-false' && finding.aiRejectionReason)
@@ -4229,11 +4264,12 @@ ui.closeAppInfo.addEventListener('click', () => ui.appInfoDialog.close());
 ui.appInfoDialog.addEventListener('click', (event) => {
   if (event.target === ui.appInfoDialog) ui.appInfoDialog.close();
 });
-ui.openSettings.addEventListener('click', () => {
-  syncCodexSettingsUI();
-  ui.settingsDialog.showModal();
-  if (codexSettings.provider === 'ollama') void prepareOllamaSettings();
-  else if (codexSettings.enabled) void refreshSelectedAiProviderStatus();
+ui.openSettings.addEventListener('click', () => showSettingsDialog());
+ui.headerAiStatus.addEventListener('click', () => {
+  showSettingsDialog({
+    aiOnly: true,
+    focusTarget: codexSettings.enabled ? ui.codexProvider : ui.codexEnabled,
+  });
 });
 ui.openOllamaSetup.addEventListener('click', async () => {
   ui.ollamaSetupDialog.showModal();
@@ -4260,6 +4296,11 @@ ui.welcomeDialog.addEventListener('click', (event) => {
   if (event.target === ui.welcomeDialog) closeWelcome();
 });
 ui.closeSettings.addEventListener('click', () => ui.settingsDialog.close());
+ui.settingsDialog.addEventListener('close', () => {
+  if (ui.settingsDialog.open) return;
+  ui.settingsDialog.classList.remove('ai-only');
+  ui.settingsTitle.textContent = 'Настройки';
+});
 ui.closeAiReview.addEventListener('click', () => ui.aiReviewDialog.close());
 ui.aiReviewDialog.addEventListener('close', () => {
   ui.aiReviewLiveStatus.dataset.findingKey = '';
