@@ -2829,21 +2829,6 @@ fn read_ollama_response(
     Ok(bytes)
 }
 
-#[derive(Deserialize)]
-struct OpenAiCompatibleChatResponse {
-    choices: Vec<OpenAiCompatibleChoice>,
-}
-
-#[derive(Deserialize)]
-struct OpenAiCompatibleChoice {
-    message: OpenAiCompatibleMessage,
-}
-
-#[derive(Deserialize)]
-struct OpenAiCompatibleMessage {
-    content: String,
-}
-
 fn detect_cloudru_status(api_key: &str) -> CloudruStatus {
     let api_key = match normalize_cloudru_api_key(api_key) {
         Ok(api_key) => api_key,

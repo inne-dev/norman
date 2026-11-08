@@ -31,7 +31,7 @@ jobs:
             bundle: appimage
             artifact: norman-linux-appimage
             rust-targets: ''
-            build-args: --bundles appimage
+            build-args: --bundles appimage --verbose
             path: src-tauri/target/release/bundle/appimage/*.AppImage
     runs-on: ${{ matrix.os }}
     steps:
@@ -86,6 +86,7 @@ jobs:
       - name: Build ${{ matrix.bundle }} package
         env:
           VITE_APP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          NO_STRIP: ${{ matrix.bundle == 'appimage' && 'true' || '' }}
         run: npm run tauri build -- ${{ matrix.build-args }}
 
       - name: Normalize package filename
