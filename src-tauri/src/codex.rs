@@ -2548,7 +2548,8 @@ fn ollama_pull_url_is_loopback(url: &Url) -> bool {
 fn build_ollama_pull_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .connect_timeout(STATUS_TIMEOUT)
-        .timeout(Duration::from_secs(1))
+        // Ollama may take more than a second to start or emit the next pull event.
+        .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()
