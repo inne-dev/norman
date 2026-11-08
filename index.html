@@ -34,10 +34,10 @@
             <progress id="ollamaDownloadProgress" max="100" value="0" aria-hidden="true"></progress>
             <span class="ollama-download-percent" id="ollamaDownloadPercent"></span>
           </div>
-          <div class="header-ai-status" id="headerAiStatus" role="group" aria-label="Настройки проверки с помощью ИИ" hidden>
+          <button class="header-ai-status" id="headerAiStatus" type="button" aria-label="Открыть настройки ИИ" title="Открыть настройки ИИ" aria-haspopup="dialog" aria-controls="settingsDialog" hidden>
             <span id="headerAiProviderIcon"></span>
             <span class="header-ai-reasoning" id="headerAiReasoning" hidden></span>
-          </div>
+          </button>
           <button class="app-info-button" id="openAppInfo" type="button" aria-label="О программе" title="О программе">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <circle cx="12" cy="12" r="9" />
@@ -89,7 +89,7 @@
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
           </button>
           <img class="welcome-star" src="/welcome/star-mascot.png" alt="Звёздочка Нормана" />
-          <h2 id="welcomeTitle">Добро пожаловать в Норман</h2>
+          <h2 id="welcomeTitle">Добро пожаловать</h2>
           <p id="welcomeDescription">Для наиболее полного разбора найденных сигналов можно включить дополнительную проверку с помощью ИИ. Провайдера и модель можно выбрать в настройках.</p>
           <p class="welcome-privacy">ИИ-проверка выключена по умолчанию. Документ будет отправляться только выбранному вами провайдеру после включения этой функции.</p>
           <section class="welcome-ollama" id="welcomeOllama" aria-labelledby="welcomeOllamaTitle" hidden>
@@ -194,7 +194,7 @@
             </label>
             <p class="preview-note">Встроенный фильтр скрывает очевидные рекламные блоки. Расширение uBlock Origin в этом превью недоступно.</p>
           </section>
-          <section class="settings-group settings-codex" aria-labelledby="codexSettingsTitle">
+          <section class="settings-group settings-codex" id="aiSettingsGroup" aria-labelledby="codexSettingsTitle">
             <h3 id="codexSettingsTitle">Проверка с помощью ИИ</h3>
             <label class="codex-opt-in">
               <input id="codexEnabled" type="checkbox" />
@@ -215,11 +215,21 @@
               <div class="codex-provider-options" id="codexProviderOptions">
                 <div class="codex-field">
                   <span>Модель</span>
-                  <select class="modal-input codex-select" id="codexModel">
-                    <option value="gpt-6-luna">gpt-6-luna</option>
-                    <option value="gpt-6.1-sol">gpt-6.1-sol</option>
-                    <option value="gpt-6-astra">gpt-6-astra</option>
-                  </select>
+                  <div class="ai-provider-model-control">
+                    <select class="modal-input codex-select" id="codexModel">
+                      <option value="gpt-6-luna">gpt-6-luna</option>
+                      <option value="gpt-6.1-sol">gpt-6.1-sol</option>
+                      <option value="gpt-6-astra">gpt-6-astra</option>
+                    </select>
+                    <button class="ai-provider-check-button" id="checkCodexStatus" type="button" aria-label="Проверить подключение Codex" title="Проверить подключение Codex">
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M20 11a8 8 0 0 0-14-5L4 8" />
+                        <path d="M4 4v4h4" />
+                        <path d="M4 13a8 8 0 0 0 14 5l2-2" />
+                        <path d="M20 20v-4h-4" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
                 <div class="codex-field">
                   <span>Уровень рассуждения</span>
@@ -231,7 +241,37 @@
                 </div>
                 <div class="codex-status-row">
                   <p id="codexStatus" role="status" aria-live="polite">Статус Codex ещё не проверен.</p>
-                  <button class="button button-secondary" id="checkCodexStatus" type="button">Проверить</button>
+                </div>
+              </div>
+              <div class="codex-provider-options" id="claudeOptions" hidden>
+                <div class="codex-field">
+                  <span>Модель Claude</span>
+                  <div class="ai-provider-model-control">
+                    <select class="modal-input codex-select" id="claudeModel">
+                      <option value="sonnet">Sonnet</option>
+                      <option value="opus">Opus</option>
+                      <option value="haiku">Haiku</option>
+                    </select>
+                    <button class="ai-provider-check-button" id="checkClaudeStatus" type="button" aria-label="Проверить доступность Claude Code" title="Проверить доступность Claude Code">
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M20 11a8 8 0 0 0-14-5L4 8" />
+                        <path d="M4 4v4h4" />
+                        <path d="M4 13a8 8 0 0 0 14 5l2-2" />
+                        <path d="M20 20v-4h-4" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="codex-field">
+                  <span>Уровень рассуждения</span>
+                  <select class="modal-input codex-select" id="claudeReasoning">
+                    <option value="low">Низкое</option>
+                    <option value="medium">Среднее</option>
+                    <option value="high">Высокое</option>
+                  </select>
+                </div>
+                <div class="codex-status-row">
+                  <p id="claudeStatus" role="status" aria-live="polite">Статус Claude Code ещё не проверен.</p>
                 </div>
               </div>
               <div class="codex-provider-options" id="claudeOptions" hidden>
@@ -258,7 +298,7 @@
                 </div>
               </div>
               <div class="codex-provider-options" id="ollamaOptions" hidden>
-                <p class="codex-privacy-note codex-warning-note" role="note">Скорость и качество обработки через Ollama сильно зависят от мощности устройства.</p>
+                <p class="codex-privacy-note codex-warning-note" role="note">Скорость и качество обработки через Ollama сильно зависят от характеристик устройства.</p>
                 <label class="codex-field codex-field-text" for="ollamaBaseUrl">
                   <span>Адрес Ollama</span>
                   <span class="ollama-address-control" id="ollamaAddressControl">
@@ -268,18 +308,29 @@
                     </svg>
                   </span>
                 </label>
-                <div class="codex-field">
+                <div class="codex-field ollama-model-field">
                   <span>Модель</span>
-                  <select class="modal-input codex-select" id="ollamaModel" disabled>
-                    <option value="">Проверьте подключение</option>
-                  </select>
+                  <div class="ai-provider-model-control">
+                    <select class="modal-input codex-select" id="ollamaModel" disabled>
+                      <option value="">Проверьте подключение</option>
+                    </select>
+                    <button class="ai-provider-check-button" id="checkOllamaStatus" type="button" aria-label="Проверить подключение Ollama" title="Проверить подключение Ollama">
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M20 11a8 8 0 0 0-14-5L4 8" />
+                        <path d="M4 4v4h4" />
+                        <path d="M4 13a8 8 0 0 0 14 5l2-2" />
+                        <path d="M20 20v-4h-4" />
+                      </svg>
+                    </button>
+                  </div>
+                  <button class="button button-secondary ollama-recommendation-button" id="openOllamaSetup" type="button" hidden>Подобрать оптимальную модель</button>
                 </div>
-                <div class="codex-status-row">
+                <div class="codex-status-row ollama-status-row">
                   <p id="ollamaStatus" role="status" aria-live="polite">Статус Ollama ещё не проверен.</p>
-                  <button class="button button-secondary" id="startOllama" type="button" hidden>Запустить Ollama</button>
-                  <button class="button button-secondary" id="checkOllamaStatus" type="button">Проверить</button>
+                  <div class="ollama-status-actions">
+                    <button class="button button-secondary" id="startOllama" type="button" hidden>Запустить Ollama</button>
+                  </div>
                 </div>
-                <button class="button button-secondary ollama-recommendation-button" id="openOllamaSetup" type="button" hidden>Подобрать оптимальную модель</button>
               </div>
               <div class="codex-provider-options" id="cloudRuOptions" hidden>
                 <label class="codex-field codex-field-text" for="cloudRuApiKey">
@@ -289,13 +340,22 @@
                 <p class="codex-privacy-note cloudru-privacy-note">Ключ действует только до закрытия приложения и не сохраняется.</p>
                 <div class="codex-field">
                   <span>Модель</span>
-                  <select class="modal-input codex-select" id="cloudRuModel" disabled>
-                    <option value="">Проверьте подключение</option>
-                  </select>
+                  <div class="ai-provider-model-control">
+                    <select class="modal-input codex-select" id="cloudRuModel" disabled>
+                      <option value="">Проверьте подключение</option>
+                    </select>
+                    <button class="ai-provider-check-button" id="checkCloudRuStatus" type="button" aria-label="Проверить подключение Cloud.ru" title="Проверить подключение Cloud.ru">
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M20 11a8 8 0 0 0-14-5L4 8" />
+                        <path d="M4 4v4h4" />
+                        <path d="M4 13a8 8 0 0 0 14 5l2-2" />
+                        <path d="M20 20v-4h-4" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
                 <div class="codex-status-row">
                   <p id="cloudRuStatus" role="status" aria-live="polite">Введите API-ключ и проверьте подключение.</p>
-                  <button class="button button-secondary" id="checkCloudRuStatus" type="button">Проверить</button>
                 </div>
               </div>
               <div class="codex-provider-options" id="yandexOptions" hidden>
@@ -311,13 +371,22 @@
                 <p class="codex-privacy-note codex-warning-note" id="yandexFolderIdNote" role="note">ID каталога сохраняется в настройках.</p>
                 <div class="codex-field">
                   <span>Модель</span>
-                  <select class="modal-input codex-select" id="yandexModel" disabled>
-                    <option value="">Проверьте подключение</option>
-                  </select>
+                  <div class="ai-provider-model-control">
+                    <select class="modal-input codex-select" id="yandexModel" disabled>
+                      <option value="">Проверьте подключение</option>
+                    </select>
+                    <button class="ai-provider-check-button" id="checkYandexStatus" type="button" aria-label="Проверить подключение Yandex AI Studio" title="Проверить подключение Yandex AI Studio">
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M20 11a8 8 0 0 0-14-5L4 8" />
+                        <path d="M4 4v4h4" />
+                        <path d="M4 13a8 8 0 0 0 14 5l2-2" />
+                        <path d="M20 20v-4h-4" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
                 <div class="codex-status-row">
                   <p id="yandexStatus" role="status" aria-live="polite">Введите API-ключ и ID каталога, затем проверьте подключение.</p>
-                  <button class="button button-secondary" id="checkYandexStatus" type="button">Проверить</button>
                 </div>
               </div>
             </div>
@@ -332,7 +401,6 @@
             <button class="modal-close" id="closeOllamaSetup" type="button" aria-label="Закрыть"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg></button>
           </div>
           <section class="ollama-setup" id="ollamaSetup" aria-labelledby="ollamaSetupDialogTitle">
-            <p>Ollama работает локально.</p>
             <p class="ollama-setup-memory" id="ollamaSetupMemory" aria-live="polite"></p>
             <label class="codex-field" for="ollamaSetupModel">
               <span>Модель</span>
@@ -374,7 +442,7 @@
               <ol class="ai-review-chat" id="aiReviewLiveMessages" role="log" aria-live="polite" aria-relevant="additions text"></ol>
               <div class="ai-review-live-typing" id="aiReviewLiveTyping" role="status" hidden>
                 <span class="ai-review-typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-                <span class="ai-review-typing-label">Модель готовит первую оценку</span>
+                <span class="ai-review-typing-label">Модель готовит оценку</span>
               </div>
             </section>
             <section class="ai-review-section" id="aiReviewResultSection" aria-labelledby="aiReviewResultTitle">
@@ -393,10 +461,6 @@
               <h3 id="aiReviewRuleTitle">Объяснение правила</h3>
               <p class="ai-review-rule-explanation" id="aiReviewRuleExplanation"></p>
             </section>
-            <details class="ai-review-section ai-review-reasoning" id="aiReviewReasoningDetails" aria-labelledby="aiReviewReasoningTitle">
-              <summary id="aiReviewReasoningTitle">Рассуждение ИИ</summary>
-              <p class="ai-review-rationale" id="aiReviewRationale"></p>
-            </details>
           </div>
           <ol class="ai-review-content ai-review-results-list" id="aiReviewResultsList" aria-label="Результаты ИИ по сигналам" hidden></ol>
         </div>

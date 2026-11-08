@@ -165,8 +165,17 @@ function enhanceSelect(select) {
       const optionIcon = makeProviderIcon(option.value, 'custom-select-icon');
       if (optionIcon) item.append(optionIcon);
       const text = document.createElement('span');
-      text.className = 'custom-select-label';
-      text.textContent = option.label || option.textContent || '';
+      text.className = 'custom-select-option-copy';
+      const label = document.createElement('span');
+      label.className = 'custom-select-label';
+      label.textContent = option.label || option.textContent || '';
+      text.append(label);
+      if (option.dataset.description) {
+        const description = document.createElement('span');
+        description.className = 'custom-select-description';
+        description.textContent = option.dataset.description;
+        text.append(description);
+      }
       item.append(text);
       if (option.dataset.badge) {
         const badge = document.createElement('span');
