@@ -274,6 +274,29 @@
                   <p id="claudeStatus" role="status" aria-live="polite">Статус Claude Code ещё не проверен.</p>
                 </div>
               </div>
+              <div class="codex-provider-options" id="claudeOptions" hidden>
+                <p class="codex-privacy-note">Claude Code сохраняет сессии локально, чтобы продолжить запрос после сбоя.</p>
+                <div class="codex-field">
+                  <span>Модель Claude</span>
+                  <select class="modal-input codex-select" id="claudeModel">
+                    <option value="sonnet">Sonnet</option>
+                    <option value="opus">Opus</option>
+                    <option value="haiku">Haiku</option>
+                  </select>
+                </div>
+                <div class="codex-field">
+                  <span>Уровень рассуждения</span>
+                  <select class="modal-input codex-select" id="claudeReasoning">
+                    <option value="low">Низкое</option>
+                    <option value="medium">Среднее</option>
+                    <option value="high">Высокое</option>
+                  </select>
+                </div>
+                <div class="codex-status-row">
+                  <p id="claudeStatus" role="status" aria-live="polite">Статус Claude Code ещё не проверен.</p>
+                  <button class="button button-secondary" id="checkClaudeStatus" type="button">Проверить</button>
+                </div>
+              </div>
               <div class="codex-provider-options" id="ollamaOptions" hidden>
                 <p class="codex-privacy-note codex-warning-note" role="note">Скорость и качество обработки через Ollama сильно зависят от характеристик устройства.</p>
                 <label class="codex-field codex-field-text" for="ollamaBaseUrl">

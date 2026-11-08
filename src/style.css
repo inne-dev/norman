@@ -1924,6 +1924,10 @@ main {
   color: var(--text-disabled);
 }
 
+.custom-select-option > .custom-select-label {
+  flex: 1;
+}
+
 .custom-select-badge {
   flex: 0 0 auto;
   margin-left: auto;
