@@ -1031,6 +1031,7 @@ fn analyze_with_ai_inner(
                 .enumerate()
                 .map(|(offset, &index)| {
                     let prompt = &verify_prompts[batch_start + offset];
+                    let finding_id = findings[index].id.clone();
                     let schema = verify_schema.clone();
                     let provider = provider.clone();
                     scope.spawn(move || {
@@ -1039,7 +1040,6 @@ fn analyze_with_ai_inner(
                         private_dir.write_file(verify_schema_path, &schema)?;
                         let app = app.clone();
                         let analysis_id = analysis_id.to_string();
-                        let finding_id = findings[index].id.clone();
                         let finding_deadline = (Instant::now() + AI_SIGNAL_TIMEOUT).min(deadline);
                         review_finding(
                             &provider,
@@ -1804,7 +1804,7 @@ fn run_structured_prompt<T: for<'de> Deserialize<'de>>(
     reasoning_effort: Option<&str>,
     deadline: Instant,
     control: &super::AnalysisPauseControl,
-    mut on_stream: Option<&mut dyn FnMut(&str, bool)>,
+    on_stream: Option<&mut dyn FnMut(&str, bool)>,
 ) -> Result<T, String> {
     if control.is_cancelled() {
         return Err("AI-анализ отменён.".into());
@@ -3475,6 +3475,7 @@ fn run_process_for_observing(
     }
     let stdout = stdout_reader
         .join()
+        .map_err(|_| format!("Не удалось прочитать вывод {cli_name} CLI."))?
         .map_err(|_| format!("Не удалось прочитать вывод {cli_name} CLI."))?;
     while let Ok(bytes) = stdout_receiver.try_recv() {
         if let Some(on_stdout) = on_stdout.as_deref_mut() {
