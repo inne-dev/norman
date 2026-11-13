@@ -254,6 +254,7 @@ fn latest_ollama_release_asset(asset_name: &str) -> Result<VerifiedReleaseAsset,
     }
 
     let client = Client::builder()
+        .https_only(true)
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(30))
         .user_agent("Norman Ollama installer")
@@ -340,6 +341,7 @@ fn download_verified_asset(
 ) -> Result<PathBuf, String> {
     check_setup_cancelled()?;
     let client = Client::builder()
+        .https_only(true)
         .connect_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::limited(10))
