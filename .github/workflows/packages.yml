@@ -18,6 +18,10 @@ on:
     tags:
       - "**"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -89,26 +93,33 @@ jobs:
         shell: bash
         run: rustup target add ${{ matrix.rust-targets }}
 
-      - run: npm ci
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.rust-targets }}
+          cache-on-failure: true
 
-      - name: Test Windows Rust code
-        if: runner.os == 'Windows'
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - run: npm ci
 
       - name: Test Windows release checks
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/test-windows-release-evidence.ps1
 
-      - name: Verify rule catalog regression
-        if: runner.os == 'Linux'
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml risk_rule_catalog_compiles_and_matches_cyrillic_domains
-
       - name: Build ${{ matrix.bundle }} package
         env:
           VITE_APP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           NO_STRIP: ${{ matrix.bundle == 'appimage' && 'true' || '' }}
-        run: npm run tauri build -- ${{ matrix.build-args }}
+        run: npm run tauri build -- ${{ matrix.build-args }} -- --locked
+
+      # Reuse Tauri's release dependencies and embedded frontend assets.
+      - name: Test Windows Rust code
+        if: runner.os == 'Windows'
+        run: cargo test --release --locked --features tauri/custom-protocol --manifest-path src-tauri/Cargo.toml
+
+      - name: Verify rule catalog regression
+        if: runner.os == 'Linux'
+        run: cargo test --release --locked --features tauri/custom-protocol --manifest-path src-tauri/Cargo.toml risk_rule_catalog_compiles_and_matches_cyrillic_domains
 
       - name: Normalize package filename
         env:
@@ -129,6 +140,7 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.path }}
           if-no-files-found: error
+          compression-level: 0
 
       - uses: actions/upload-artifact@v7
         if: runner.os == 'Windows' && always()
@@ -149,6 +161,7 @@ jobs:
       - uses: actions/download-artifact@v7
         with:
           path: release-assets
+          pattern: norman-*-{dmg,nsis,appimage}
           merge-multiple: true
 
       - name: Generate SHA256 checksums
