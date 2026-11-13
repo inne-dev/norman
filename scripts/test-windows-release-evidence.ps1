@@ -78,3 +78,6 @@ if ($args -contains '-SignatureUpdate') {
 } finally {
   Remove-Item $testRoot -Recurse -Force
 }
+
+# Expected scanner failures leave LASTEXITCODE nonzero in GitHub's pwsh wrapper.
+exit 0
