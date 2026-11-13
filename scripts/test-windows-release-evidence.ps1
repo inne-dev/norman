@@ -1,6 +1,5 @@
 $ErrorActionPreference = 'Stop'
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
-$originalThumbprint = $env:WINDOWS_CERTIFICATE_THUMBPRINT
 $evidenceScript = Join-Path $PSScriptRoot 'windows-release-evidence.ps1'
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 
@@ -22,10 +21,13 @@ function Get-ChildItem {
 }
 function Get-AuthenticodeSignature {
   [pscustomobject]@{
-    Status = if ($testCase -in @('signed', 'wrong-signer')) { 'Valid' } else { 'NotSigned' }
+    Status = switch ($testCase) {
+      'valid-signature' { 'Valid' }
+      'invalid-signature' { 'HashMismatch' }
+      default { 'NotSigned' }
+    }
     SignerCertificate = [pscustomobject]@{
       Subject = 'Test publisher'
-      Thumbprint = if ($testCase -eq 'wrong-signer') { 'OTHER' } else { 'TEST' }
     }
   }
 }
@@ -49,15 +51,14 @@ if ($args -contains '-SignatureUpdate') {
   'app fixture' | Set-Content $app
   'installer fixture' | Set-Content $installer
 
-  foreach ($testCase in @('unsigned', 'signed', 'on-demand-only', 'detection', 'disabled', 'status-error', 'missing-scanner', 'update-error', 'unsigned-when-required', 'wrong-signer', 'missing-app')) {
-    $env:WINDOWS_CERTIFICATE_THUMBPRINT = if ($testCase -in @('signed', 'unsigned-when-required', 'wrong-signer')) { 'TEST' } else { '' }
+  foreach ($testCase in @('unsigned', 'valid-signature', 'invalid-signature', 'on-demand-only', 'detection', 'disabled', 'status-error', 'missing-scanner', 'update-error', 'missing-app')) {
     $reportPath = Join-Path $testRoot "$testCase.json"
     $appPath = if ($testCase -eq 'missing-app') { Join-Path $testRoot 'missing.exe' } else { $app }
     $failure = $null
     try {
       & $evidenceScript -InstallerPath $installer -AppPath $appPath -EvidencePath $reportPath
     } catch { $failure = $_ }
-    $shouldPass = $testCase -in @('unsigned', 'signed', 'on-demand-only')
+    $shouldPass = $testCase -in @('unsigned', 'valid-signature', 'on-demand-only')
     if ($shouldPass -eq [bool]$failure) { throw "Unexpected result for ${testCase}: $failure" }
     $report = Get-Content $reportPath -Raw | ConvertFrom-Json
     if ($shouldPass) {
@@ -66,12 +67,14 @@ if ($args -contains '-SignatureUpdate') {
       }
       if (-not $report.defender.scannedUtc) { throw "Missing scan completion for $testCase" }
     } elseif (-not $report.failure) { throw "Missing failure evidence for $testCase" }
+    if ($testCase -eq 'invalid-signature' -and $report.files[0].signatureStatus -ne 'HashMismatch') {
+      throw 'Invalid Authenticode status was lost from evidence'
+    }
     if ($testCase -eq 'detection' -and ($report.files[0].scanExitCode -ne 2 -or $report.files[0].scanOutput -ne 'Scan output')) {
       throw 'Detection evidence was lost'
     }
     Write-Host "PASS $testCase"
   }
 } finally {
-  $env:WINDOWS_CERTIFICATE_THUMBPRINT = $originalThumbprint
   Remove-Item $testRoot -Recurse -Force
 }

@@ -1,6 +1,18 @@
 name: Packages
 
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/packages.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "index.html"
+      - "vite.config.js"
+      - "data/**"
+      - "public/**"
+      - "src/**"
+      - "src-tauri/**"
+      - "scripts/**"
   workflow_dispatch:
   push:
     tags:
@@ -79,62 +91,24 @@ jobs:
 
       - run: npm ci
 
+      - name: Test Windows Rust code
+        if: runner.os == 'Windows'
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
       - name: Test Windows release checks
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/test-windows-release-evidence.ps1
-
-      - name: Prepare optional Windows signing certificate
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          $hasCertificate = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)
-          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)
-          if ($hasCertificate -ne $hasPassword) {
-            throw 'Set both WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD secrets, or neither.'
-          }
-          if (-not $hasCertificate) {
-            'Windows release will be unsigned: signing secrets are not configured.' | Write-Host
-            exit 0
-          }
-
-          $pfxPath = Join-Path $env:RUNNER_TEMP 'norman-signing.pfx'
-          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password |
-            Where-Object HasPrivateKey | Select-Object -First 1
-          if (-not $certificate) { throw 'Imported signing certificate has no private key.' }
-          "WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Verify rule catalog regression
         if: runner.os == 'Linux'
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml risk_rule_catalog_compiles_and_matches_cyrillic_domains
 
       - name: Build ${{ matrix.bundle }} package
-        if: runner.os != 'Windows'
         env:
           VITE_APP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           NO_STRIP: ${{ matrix.bundle == 'appimage' && 'true' || '' }}
         run: npm run tauri build -- ${{ matrix.build-args }}
-
-      - name: Build Windows package
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          VITE_APP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-        run: |
-          $configPath = Join-Path $env:RUNNER_TEMP 'tauri.windows.conf.json'
-          if ($env:WINDOWS_CERTIFICATE_THUMBPRINT) {
-            @{ bundle = @{ windows = @{ certificateThumbprint = $env:WINDOWS_CERTIFICATE_THUMBPRINT } } } |
-              ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath -Encoding utf8
-          } else {
-            '{}' | Set-Content -LiteralPath $configPath -Encoding utf8
-          }
-          npm run tauri build -- --bundles nsis --config $configPath
-          if ($LASTEXITCODE -ne 0) { throw "Tauri Windows build failed with exit code $LASTEXITCODE." }
 
       - name: Normalize package filename
         env:
@@ -162,15 +136,6 @@ jobs:
           name: norman-windows-security-evidence
           path: windows-release-evidence.json
           if-no-files-found: warn
-
-      - name: Remove Windows signing certificate
-        if: runner.os == 'Windows' && always()
-        shell: pwsh
-        run: |
-          if ($env:WINDOWS_CERTIFICATE_THUMBPRINT) {
-            Remove-Item "Cert:\CurrentUser\My\$env:WINDOWS_CERTIFICATE_THUMBPRINT" -DeleteKey -ErrorAction SilentlyContinue
-          }
-          Remove-Item (Join-Path $env:RUNNER_TEMP 'norman-signing.pfx') -Force -ErrorAction SilentlyContinue
 
   release:
     if: github.event_name == 'push' && github.ref_type == 'tag'

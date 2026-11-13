@@ -5,10 +5,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$signedBuild = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_THUMBPRINT)
 $metadata = [ordered]@{
   generatedUtc = [DateTime]::UtcNow.ToString('o')
-  signingConfigured = $signedBuild
   defender = $null
   files = @()
 }
@@ -39,16 +37,6 @@ try {
 
   foreach ($path in $paths) {
     $signature = Get-AuthenticodeSignature -FilePath $path
-    if ($signedBuild -and $signature.Status -ne 'Valid') {
-      throw "Expected a valid Authenticode signature for $path; got $($signature.Status)."
-    }
-    if ($signedBuild -and $signature.SignerCertificate.Thumbprint -ne $env:WINDOWS_CERTIFICATE_THUMBPRINT) {
-      throw "Unexpected signing certificate for $path."
-    }
-    if (-not $signedBuild -and $signature.Status -notin @('NotSigned', 'Valid')) {
-      throw "Unexpected Authenticode status for $path`: $($signature.Status)."
-    }
-
     $scanOutput = & $mpCmd -Scan -ScanType 3 -File $path -DisableRemediation 2>&1
     $scanExitCode = $LASTEXITCODE
 
@@ -60,6 +48,9 @@ try {
       signer = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { $null }
       scanExitCode = $scanExitCode
       scanOutput = ($scanOutput | ForEach-Object { "$($_)" }) -join "`n"
+    }
+    if ($signature.Status -notin @('NotSigned', 'Valid')) {
+      throw "Unexpected Authenticode status for $path`: $($signature.Status)."
     }
     if ($scanExitCode -ne 0) { throw "Defender scan failed for $path ($scanExitCode): $($scanOutput -join ' ')" }
   }
