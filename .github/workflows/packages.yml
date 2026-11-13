@@ -79,15 +79,62 @@ jobs:
 
       - run: npm ci
 
+      - name: Test Windows release checks
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test-windows-release-evidence.ps1
+
+      - name: Prepare optional Windows signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $hasCertificate = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)
+          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)
+          if ($hasCertificate -ne $hasPassword) {
+            throw 'Set both WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD secrets, or neither.'
+          }
+          if (-not $hasCertificate) {
+            'Windows release will be unsigned: signing secrets are not configured.' | Write-Host
+            exit 0
+          }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'norman-signing.pfx'
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password |
+            Where-Object HasPrivateKey | Select-Object -First 1
+          if (-not $certificate) { throw 'Imported signing certificate has no private key.' }
+          "WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Verify rule catalog regression
         if: runner.os == 'Linux'
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml risk_rule_catalog_compiles_and_matches_cyrillic_domains
 
       - name: Build ${{ matrix.bundle }} package
+        if: runner.os != 'Windows'
         env:
           VITE_APP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           NO_STRIP: ${{ matrix.bundle == 'appimage' && 'true' || '' }}
         run: npm run tauri build -- ${{ matrix.build-args }}
+
+      - name: Build Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VITE_APP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          $configPath = Join-Path $env:RUNNER_TEMP 'tauri.windows.conf.json'
+          if ($env:WINDOWS_CERTIFICATE_THUMBPRINT) {
+            @{ bundle = @{ windows = @{ certificateThumbprint = $env:WINDOWS_CERTIFICATE_THUMBPRINT } } } |
+              ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath -Encoding utf8
+          } else {
+            '{}' | Set-Content -LiteralPath $configPath -Encoding utf8
+          }
+          npm run tauri build -- --bundles nsis --config $configPath
+          if ($LASTEXITCODE -ne 0) { throw "Tauri Windows build failed with exit code $LASTEXITCODE." }
 
       - name: Normalize package filename
         env:
@@ -95,11 +142,35 @@ jobs:
           BUNDLE_KIND: ${{ matrix.bundle }}
         run: node scripts/rename-release-asset.mjs
 
+      - name: Scan and record Windows release evidence
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem 'src-tauri/target/release/bundle/nsis/*-setup.exe' | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $installer) { throw 'NSIS installer was not produced.' }
+          ./scripts/windows-release-evidence.ps1 -InstallerPath $installer -AppPath 'src-tauri/target/release/norman.exe' -EvidencePath 'windows-release-evidence.json'
+
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.path }}
           if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Windows' && always()
+        with:
+          name: norman-windows-security-evidence
+          path: windows-release-evidence.json
+          if-no-files-found: warn
+
+      - name: Remove Windows signing certificate
+        if: runner.os == 'Windows' && always()
+        shell: pwsh
+        run: |
+          if ($env:WINDOWS_CERTIFICATE_THUMBPRINT) {
+            Remove-Item "Cert:\CurrentUser\My\$env:WINDOWS_CERTIFICATE_THUMBPRINT" -DeleteKey -ErrorAction SilentlyContinue
+          }
+          Remove-Item (Join-Path $env:RUNNER_TEMP 'norman-signing.pfx') -Force -ErrorAction SilentlyContinue
 
   release:
     if: github.event_name == 'push' && github.ref_type == 'tag'
@@ -115,19 +186,25 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          cd release-assets
+          sha256sum *.dmg *.exe *.AppImage > SHA256SUMS.txt
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+            gh release upload "$GITHUB_REF_NAME" release-assets/*.dmg release-assets/*.exe release-assets/*.AppImage release-assets/SHA256SUMS.txt --clobber
             gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | while IFS= read -r asset; do
               case "$asset" in
                 _*) gh release delete-asset "$GITHUB_REF_NAME" "$asset" --yes ;;
               esac
             done
           else
-            gh release create "$GITHUB_REF_NAME" release-assets/* \
+            gh release create "$GITHUB_REF_NAME" release-assets/*.dmg release-assets/*.exe release-assets/*.AppImage release-assets/SHA256SUMS.txt \
               --verify-tag \
               --title "Норман $GITHUB_REF_NAME" \
               --generate-notes

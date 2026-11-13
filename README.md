@@ -49,6 +49,8 @@ git push origin v1.2.3
 
 GitHub Actions соберёт macOS DMG, Windows NSIS и Linux AppImage и приложит файлы к GitHub Release. Повторный запуск обновит файлы релиза. `workflow_dispatch` соберёт те же файлы как артефакты workflow, но не опубликует релиз. Локальную сборку запускайте на целевой ОС приведёнными выше командами; для неё нужны системные зависимости Tauri.
 
+Установщик Windows может быть без подписи, если не настроены secrets для выпуска. Предупреждения SmartScreen и антивируса имеют разные причины; настройка подписи, CI-проверки, ограничения и порядок сообщения о ложном срабатывании описаны в [инструкции для Windows](docs/windows-security.md).
+
 ## Просмотр сайта и uBlock Origin
 
 Встроенный просмотр сайта ограничивает навигацию, отключает JavaScript и не даёт удалённой странице доступа к командам приложения. Кнопка открытия оригинала запускает системный браузер, где используется установленный uBlock Origin. Встроенное расширение uBlock нельзя обещать на всех платформах: Tauri поддерживает WebView-расширения в Windows, но не в macOS и Linux ([документация Tauri](https://docs.rs/tauri/latest/tauri/webview/struct.WebviewWindowBuilder.html#method.browser_extensions_enabled)).
