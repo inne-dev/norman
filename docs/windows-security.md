@@ -18,7 +18,9 @@ This does not reproduce a Defender Antivirus detection, establish SmartScreen re
 
 The Windows workflow can sign the app executable and NSIS installer using Authenticode and SHA-256 file digests with a timestamp. Signing is optional until the project maintainer provisions a code-signing certificate. Without both secrets, packages remain unsigned. If only one secret is configured, or signing is configured but fails, the Windows release job fails instead of silently publishing a partially signed package. CI writes a temporary Tauri config with the imported certificate thumbprint. Tauri uses Windows SDK SignTool to sign the app and installer with SHA-256 and an RFC 3161 timestamp. Signing credentials are imported for the job and removed in an `always()` cleanup step.
 
-To enable signing, add repository or environment secrets:
+The current CI integration imports a PFX with a private key. This is a limited integration path, not a recommendation for obtaining a new public certificate. Modern public code-signing providers normally keep private keys on a token or HSM, so their keys cannot be exported to this secret. Token/HSM or managed signing requires a provider-specific integration or a suitably provisioned Windows signing runner. Select a provider and confirm eligibility before configuring CI. See [issuance restrictions for a Russia-resident individual](windows-signing-russia.md).
+
+For a certificate whose private key is legitimately available as an importable PFX, add repository or environment secrets:
 
 - `WINDOWS_CERTIFICATE`: base64-encoded PFX bytes, without `certutil`'s BEGIN/END text wrapper.
 - `WINDOWS_CERTIFICATE_PASSWORD`: PFX export password.
@@ -48,3 +50,5 @@ The signing secrets above are optional. Keep the same publisher identity for rel
 ## Verification
 
 Run `pwsh -NoProfile -File scripts/test-windows-release-evidence.ps1` to check the gate with mocked Windows APIs and scanner results. It covers clean files, required signatures, signer mismatch, detections, unavailable protection, update errors, and missing files. These tests also run on Windows CI; they do not replace the actual package scan.
+
+Prepared vendor review requests are in [windows-vendor-review-requests.md](windows-vendor-review-requests.md). They have not been sent.
