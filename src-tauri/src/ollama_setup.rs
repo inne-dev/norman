@@ -170,13 +170,15 @@ fn start_ollama_inner() -> Result<(), String> {
     }
 
     if let Some(cli) = ollama_cli_path() {
-        return Command::new(cli)
+        let mut command = Command::new(cli);
+        command
             .arg("serve")
             .env("OLLAMA_HOST", "127.0.0.1:11434")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
+            .stderr(Stdio::null());
+        super::process::configure_background_command(&mut command);
+        return command.spawn()
             .map(|_| ())
             .map_err(|_| "Не удалось запустить установленную Ollama.".into());
     }
@@ -429,14 +431,15 @@ fn user_home() -> Result<PathBuf, String> {
 }
 
 fn start_existing_cli() -> bool {
-    Command::new("ollama")
+    let mut command = Command::new("ollama");
+    command
         .arg("serve")
         .env("OLLAMA_HOST", "127.0.0.1:11434")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .is_ok()
+        .stderr(Stdio::null());
+    super::process::configure_background_command(&mut command);
+    command.spawn().is_ok()
 }
 
 fn run_cancellable(

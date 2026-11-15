@@ -20,6 +20,7 @@ use url::Url;
 
 mod codex;
 mod ollama_setup;
+mod process;
 
 const MAX_FILE_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 15 * 1024 * 1024;
@@ -182,12 +183,14 @@ pub(crate) fn terminate_ai_process_group(process_id: u32) {
     #[cfg(windows)]
     {
         let process_id = process_id.to_string();
-        let _ = Command::new("taskkill.exe")
+        let mut command = Command::new("taskkill.exe");
+        command
             .args(["/PID", &process_id, "/T", "/F"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+            .stderr(Stdio::null());
+        process::configure_background_command(&mut command);
+        let _ = command.status();
     }
     #[cfg(unix)]
     {
@@ -754,7 +757,8 @@ fn convert_legacy_doc_with_libreoffice(path: &Path) -> AppResult<String> {
     let mut converter_found = false;
 
     for program in ["libreoffice", "soffice"] {
-        let child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .arg("--headless")
             .arg("--convert-to")
             .arg("docx")
@@ -763,8 +767,9 @@ fn convert_legacy_doc_with_libreoffice(path: &Path) -> AppResult<String> {
             .arg(path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+            .stderr(Stdio::null());
+        process::configure_background_command(&mut command);
+        let child = command.spawn();
         let mut child = match child {
             Ok(child) => {
                 converter_found = true;

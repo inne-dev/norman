@@ -3544,6 +3544,7 @@ fn build_cli_command(
                 .args(args)
                 .current_dir(working_dir)
                 .env("PATH", path);
+            super::process::configure_background_command(&mut command);
             return Ok(command);
         }
 
@@ -3572,6 +3573,7 @@ fn build_cli_command(
         let path = env::join_paths(search_paths)
             .map_err(|_| format!("Не удалось подготовить PATH для {cli_name} CLI."))?;
         command.env("PATH", path);
+        super::process::configure_background_command(&mut command);
         return Ok(command);
     }
 
@@ -3582,6 +3584,7 @@ fn build_cli_command(
         .args(args)
         .current_dir(working_dir)
         .env("PATH", path);
+    super::process::configure_background_command(&mut command);
     #[cfg(unix)]
     command.process_group(0);
     Ok(command)

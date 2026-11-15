@@ -33,6 +33,7 @@
             <span class="ollama-download-label" id="ollamaDownloadLabel"></span>
             <progress id="ollamaDownloadProgress" max="100" value="0" aria-hidden="true"></progress>
             <span class="ollama-download-percent" id="ollamaDownloadPercent"></span>
+            <span class="ollama-download-percent ollama-download-eta" id="ollamaDownloadEta" title="Примерное время скачивания текущего файла"></span>
           </div>
           <button class="header-ai-status" id="headerAiStatus" type="button" aria-label="Открыть настройки ИИ" title="Открыть настройки ИИ" aria-haspopup="dialog" aria-controls="settingsDialog" hidden>
             <span id="headerAiProviderIcon"></span>
@@ -150,6 +151,10 @@
           <fieldset class="settings-group settings-theme">
             <legend>Цветовая тема</legend>
             <div class="settings-modal-options">
+              <label class="theme-choice">
+                <input type="radio" name="theme" value="system" />
+                <span>Как в системе</span>
+              </label>
               <label class="theme-choice">
                 <input type="radio" name="theme" value="dark" />
                 <span>Тёмная</span>
@@ -394,6 +399,7 @@
             </label>
             <p class="ollama-setup-note" id="ollamaSetupNote"></p>
             <progress class="ollama-setup-progress" id="ollamaSetupProgress" max="100" hidden></progress>
+            <p class="ollama-setup-eta" id="ollamaSetupEta" aria-live="polite"></p>
             <p class="ollama-setup-status" id="ollamaSetupStatus" role="status" aria-live="polite" hidden></p>
             <button class="button button-secondary" id="installOllamaFromSettings" type="button">Установить Ollama и скачать модель</button>
             <button class="button button-secondary ollama-setup-cancel" id="cancelOllamaSetup" type="button" aria-label="Отменить скачивание и установку Ollama" hidden>Отменить</button>

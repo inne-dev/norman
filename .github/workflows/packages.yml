@@ -13,6 +13,7 @@ on:
       - "src/**"
       - "src-tauri/**"
       - "scripts/**"
+      - "tests/**"
   workflow_dispatch:
   push:
     tags:
@@ -100,6 +101,9 @@ jobs:
           cache-on-failure: true
 
       - run: npm ci
+
+      - name: Test frontend state and progress
+        run: node --test tests
 
       - name: Test Windows release checks
         if: runner.os == 'Windows'
