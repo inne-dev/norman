@@ -25,7 +25,7 @@ test('download ETA uses byte rate and resets across layers, reconnects and stall
   const first = estimateRemainingSeconds({ total: 1000, completed: 100, now: 1000, layer: 'a' });
   const next = estimateRemainingSeconds({ total: 1000, completed: 300, now: 3000, layer: 'a', previous: first.next });
   assert.equal(next.seconds, 7);
-  assert.equal(formatRemainingTime(next.seconds), 'Файл: ~1 мин.');
+  assert.equal(formatRemainingTime(next.seconds), '~1 мин.');
   const reset = estimateRemainingSeconds({ total: 1000, completed: 50, now: 4000, layer: 'b', previous: next.next });
   assert.equal(reset.seconds, null);
   const resumed = estimateRemainingSeconds({ total: 1000, completed: 150, now: 5000, layer: 'b', previous: reset.next });
@@ -40,11 +40,11 @@ test('progress and ETA stay current after dismissing and reopening setup dialog'
   const progress = () => ({ value: 0, removeAttribute(name) { if (name === 'value') this.value = null; } });
   const header = { progress: progress(), percent: { textContent: '' }, eta: { textContent: '' } };
   const dialog = { open: true, progress: progress(), eta: { textContent: '' } };
-  renderOllamaProgressFeedback(header, dialog, { percent: 30, eta: 'Файл: ~2 мин.' });
+  renderOllamaProgressFeedback(header, dialog, { percent: 30, eta: '~2 мин.' });
   dialog.open = false;
-  renderOllamaProgressFeedback(header, dialog, { percent: 65, eta: 'Файл: ~1 мин.' });
+  renderOllamaProgressFeedback(header, dialog, { percent: 65, eta: '~1 мин.' });
   assert.equal(header.percent.textContent, '65%');
   dialog.open = true;
   assert.equal(dialog.progress.value, 65);
-  assert.equal(dialog.eta.textContent, 'Файл: ~1 мин.');
+  assert.equal(dialog.eta.textContent, '~1 мин.');
 });

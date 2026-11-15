@@ -23,7 +23,7 @@ export function estimateRemainingSeconds({ total, completed, now, status, layer,
 export function formatRemainingTime(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return 'Время неизвестно';
   const minutes = Math.ceil(seconds / 60);
-  return `Файл: ~${Math.max(1, minutes)} мин.`;
+  return `~${Math.max(1, minutes)} мин.`;
 }
 
 export function renderOllamaProgressFeedback(header, dialog, update) {

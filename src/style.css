@@ -1542,6 +1542,10 @@ main {
   border-radius: 7px;
 }
 
+.settings-theme .settings-modal-options {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .theme-choice {
   position: relative;
   min-width: 0;
@@ -1562,6 +1566,10 @@ main {
   border: 1px solid transparent;
   border-radius: 4px;
   font-size: 12px;
+}
+
+.settings-theme .theme-choice span {
+  white-space: nowrap;
 }
 
 .theme-choice input:checked + span {
