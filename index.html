@@ -51,6 +51,17 @@
               <path d="M14 2v4M8 10v4m8 4v4" />
             </svg>
           </button>
+          <div class="window-controls" role="group" aria-label="Управление окном">
+            <button class="window-control" type="button" data-window-action="minimize" aria-label="Свернуть окно" title="Свернуть">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /></svg>
+            </button>
+            <button class="window-control" type="button" data-window-action="maximize" aria-label="Развернуть или восстановить окно" title="Развернуть или восстановить">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" /></svg>
+            </button>
+            <button class="window-control" type="button" data-window-action="close" aria-label="Закрыть окно" title="Закрыть">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+            </button>
+          </div>
         </div>
 
         <div class="error-banner global-error" id="errorBanner" role="alert" hidden>

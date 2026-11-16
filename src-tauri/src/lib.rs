@@ -287,6 +287,10 @@ pub struct Finding {
     pub ai_rationale: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_rejection_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_error_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -540,6 +544,24 @@ fn cancel_ai_analysis(app: tauri::AppHandle, analysis_id: String) -> Result<(), 
 }
 
 #[tauri::command]
+async fn retry_ai_finding_format(
+    text: String,
+    finding: Finding,
+    model: String,
+    parallel_processes: Option<serde_json::Value>,
+    base_url: Option<String>,
+) -> Result<Finding, String> {
+    codex::retry_ai_finding_format(
+        text,
+        finding,
+        model,
+        parallel_processes,
+        base_url,
+    )
+    .await
+}
+
+#[tauri::command]
 fn get_rule_catalog() -> Result<Vec<RuleSummary>, String> {
     compiled_rules()
         .map(|rules| {
@@ -560,6 +582,14 @@ fn get_rule_catalog() -> Result<Vec<RuleSummary>, String> {
 pub fn run() {
     let app = tauri::Builder::default()
         .manage(AnalysisPauseRegistry::default())
+        .setup(|app| {
+            if cfg!(target_os = "windows") {
+                app.get_webview_window("main")
+                    .expect("main window is configured")
+                    .set_decorations(false)?;
+            }
+            Ok(())
+        })
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
                 window.app_handle().state::<AnalysisPauseRegistry>().cancel_all();
@@ -583,6 +613,7 @@ pub fn run() {
             codex::analyze_with_claude,
             codex::get_ollama_status,
             codex::analyze_with_ollama,
+            retry_ai_finding_format,
             codex::pull_ollama_model,
             ollama_setup::begin_ollama_setup,
             ollama_setup::cancel_ollama_setup,
@@ -1612,6 +1643,8 @@ fn analyze_rule(
                     ai_confidence: None,
                     ai_rationale: None,
                     ai_rejection_reason: None,
+                    ai_error: None,
+                    ai_error_kind: None,
                 };
                 let overlap_indexes = new_findings
                     .iter()

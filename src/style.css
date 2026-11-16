@@ -275,6 +275,65 @@ html.macos-titlebar-overlay .header-actions {
   top: 9px;
 }
 
+.window-controls {
+  display: none;
+}
+
+html.windows-custom-titlebar .header-actions {
+  top: 0;
+  right: 0;
+  height: 40px;
+}
+
+html.windows-custom-titlebar .app-bar {
+  padding-right: var(--header-actions-width, 0px);
+}
+
+html.windows-custom-titlebar .new-analysis-button {
+  margin-right: 8px;
+}
+
+html.windows-custom-titlebar .window-controls {
+  display: flex;
+  flex: 0 0 auto;
+  height: 40px;
+  margin-left: 4px;
+  gap: 0;
+}
+
+html.windows-custom-titlebar .window-control {
+  width: 46px;
+  height: 40px;
+  display: grid;
+  flex: 0 0 46px;
+  place-items: center;
+  padding: 0;
+  color: var(--muted-strong);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+}
+
+html.windows-custom-titlebar .window-control:hover {
+  color: var(--text);
+  background: var(--surface-active);
+}
+
+html.windows-custom-titlebar .window-control[data-window-action="close"]:hover {
+  color: #fff;
+  background: #c42b1c;
+}
+
+html.windows-custom-titlebar .window-control svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: square;
+  stroke-width: 1.5;
+}
+
 .app-tab-list {
   height: 40px;
   min-width: 0;
@@ -1387,6 +1446,68 @@ main {
 
 .ai-review-result strong {
   font-weight: 600;
+}
+
+.ai-review-failure {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-review-error {
+  min-width: 0;
+  flex: 1;
+  margin: 0;
+  color: var(--text-inline-error);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ai-format-retry-button {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: var(--text-action);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.ai-format-retry-button:hover:not(:disabled) {
+  color: var(--text-bright);
+  background: var(--surface-control-hover);
+  border-color: var(--line-control);
+}
+
+.ai-format-retry-button:disabled {
+  opacity: 0.65;
+  cursor: progress;
+}
+
+.ai-format-retry-button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+
+.ai-format-retry-button[aria-busy="true"] svg {
+  animation: spin 750ms linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-format-retry-button[aria-busy="true"] svg {
+    animation: none;
+  }
 }
 
 .settings-modal .modal-card {
@@ -2924,6 +3045,10 @@ p {
   color: var(--text-inline-success);
 }
 
+.ai-analysis-note[data-state="warning"] {
+  color: var(--text-warning);
+}
+
 .ai-analysis-note[data-state="error"],
 .ai-analysis-note[data-state="unavailable"] {
   color: var(--text-inline-error);
@@ -3216,6 +3341,36 @@ p {
   line-height: 1;
 }
 
+.finding-card[data-confidence="likely-false"] .confidence-indicator,
+.ai-review-confidence-result[data-confidence="likely-false"] .confidence-indicator {
+  position: relative;
+  color: transparent;
+}
+
+.finding-card[data-confidence="likely-false"] .confidence-indicator::before,
+.finding-card[data-confidence="likely-false"] .confidence-indicator::after,
+.ai-review-confidence-result[data-confidence="likely-false"] .confidence-indicator::before,
+.ai-review-confidence-result[data-confidence="likely-false"] .confidence-indicator::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: var(--text);
+  content: "";
+}
+
+.finding-card[data-confidence="likely-false"] .confidence-indicator::before,
+.ai-review-confidence-result[data-confidence="likely-false"] .confidence-indicator::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.finding-card[data-confidence="likely-false"] .confidence-indicator::after,
+.ai-review-confidence-result[data-confidence="likely-false"] .confidence-indicator::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+
 .finding-details {
   display: grid;
   gap: 10px;
@@ -3256,9 +3411,12 @@ p {
 }
 
 .finding-reason {
+  min-width: 0;
   color: var(--muted-strong);
   font-size: 12px;
   line-height: 1.55;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .finding-explanation,
