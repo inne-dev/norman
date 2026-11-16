@@ -9,6 +9,8 @@ import packageInfo from '../package.json';
 import { aiConfidenceLevel, findingConfidenceLevel, isAiFinding } from './finding-confidence.js';
 import { enhanceCustomSelects, makeProviderIcon } from './custom-select.js';
 import { allModelsForRecommendation, recommendationForMemory } from './ollama-recommendations.js';
+import { estimateRemainingSeconds, formatRemainingTime, renderOllamaProgressFeedback } from './ollama-progress.js';
+import { memoryGiB, resolveTheme, savedThemePreference } from './ui-state.js';
 import './style.css';
 
 const isTauri = Boolean(window.__TAURI_INTERNALS__);
@@ -16,6 +18,8 @@ const isBrowserOllamaDev = !isTauri && import.meta.env.DEV;
 const releaseTag = import.meta.env.VITE_APP_VERSION || '';
 const displayedAppVersion = releaseTag || packageInfo.version;
 const THEME_STORAGE_KEY = 'norman-color-theme';
+const systemThemeQuery = window.matchMedia('(prefers-color-scheme: dark)');
+let currentThemePreference = 'system';
 const CODEX_STORAGE_KEY = 'norman-codex-settings';
 const WELCOME_STORAGE_KEY = 'norman-welcome-shown';
 const DEFAULT_CODEX_SETTINGS = Object.freeze({
@@ -84,6 +88,8 @@ let ollamaBrowserInstallController = null;
 let settingsOllamaMemoryChecked = false;
 let settingsOllamaMemoryBytes = null;
 let settingsOllamaRecommendation = null;
+let ollamaProgressEstimate = null;
+let ollamaSetupStage = '';
 let pageFrameDocumentRef = null;
 let pageFrameBoundDocument = null;
 const boundPreviewFindingMarks = new WeakSet();
@@ -137,6 +143,8 @@ const ui = {
   ollamaDownloadLabel: document.querySelector('#ollamaDownloadLabel'),
   ollamaDownloadProgress: document.querySelector('#ollamaDownloadProgress'),
   ollamaDownloadPercent: document.querySelector('#ollamaDownloadPercent'),
+  ollamaDownloadEta: document.querySelector('#ollamaDownloadEta'),
+  ollamaSetupEta: document.querySelector('#ollamaSetupEta'),
   headerAiStatus: document.querySelector('#headerAiStatus'),
   headerAiProviderIcon: document.querySelector('#headerAiProviderIcon'),
   headerAiReasoning: document.querySelector('#headerAiReasoning'),
@@ -348,31 +356,36 @@ let sourceTargets = new Map();
 
 function getSavedTheme() {
   try {
-    return localStorage.getItem(THEME_STORAGE_KEY) === 'light' ? 'light' : 'dark';
+    return savedThemePreference(localStorage.getItem(THEME_STORAGE_KEY));
   } catch {
-    return 'dark';
+    return 'system';
   }
 }
 
 function setTheme(theme) {
-  const selectedTheme = theme === 'light' ? 'light' : 'dark';
+  const preference = savedThemePreference(theme);
+  currentThemePreference = preference;
+  const selectedTheme = resolveTheme(preference, systemThemeQuery.matches ? 'dark' : 'light');
   document.documentElement.dataset.theme = selectedTheme;
   customSelects.refresh();
   renderHeaderAiStatus();
   for (const input of ui.settingsDialog.querySelectorAll('input[name="theme"]')) {
-    input.checked = input.value === selectedTheme;
+    input.checked = input.value === preference;
   }
 
   const themeColor = document.querySelector('meta[name="theme-color"]');
   if (themeColor) themeColor.content = selectedTheme === 'light' ? '#f4f6f8' : '#15191d';
   try {
-    localStorage.setItem(THEME_STORAGE_KEY, selectedTheme);
+    localStorage.setItem(THEME_STORAGE_KEY, preference);
   } catch {
     // The selected theme still applies for this session if storage is unavailable.
   }
 }
 
 setTheme(getSavedTheme());
+systemThemeQuery.addEventListener('change', () => {
+  if (currentThemePreference === 'system') setTheme('system');
+});
 syncCodexSettingsUI();
 showWelcome();
 
@@ -456,17 +469,29 @@ function renderOllamaDownloadStatus(model, payload = {}) {
     : Number.isFinite(total) && total > 0 && Number.isFinite(completed)
       ? Math.floor(Math.min(100, Math.max(0, completed / total * 100)))
       : 0;
+  const estimate = estimateRemainingSeconds({
+    total,
+    completed,
+    now: Date.now(),
+    status: payload.status,
+    layer: payload.digest,
+    previous: ollamaProgressEstimate,
+  });
+  ollamaProgressEstimate = estimate.next;
 
   ui.ollamaDownloadLabel.textContent = reconnecting ? 'Переподключаемся к Ollama…' : `Скачиваем ${model.name}`;
+  renderOllamaProgressFeedback(
+    { progress: ui.ollamaDownloadProgress, percent: ui.ollamaDownloadPercent, eta: ui.ollamaDownloadEta },
+    { progress: ui.ollamaSetupProgress, eta: ui.ollamaSetupEta },
+    {
+      percent: reconnecting ? null : percent,
+      eta: payload.status === 'success' ? 'Загрузка завершена' : formatRemainingTime(estimate.seconds),
+    },
+  );
   if (!reconnecting) {
-    ui.ollamaDownloadProgress.value = percent;
-    ui.ollamaDownloadPercent.textContent = `${percent}%`;
+    ui.ollamaSetupProgress.hidden = false;
   }
   ui.ollamaDownloadStatus.hidden = false;
-}
-
-function hideOllamaDownloadStatus() {
-  ui.ollamaDownloadStatus.hidden = true;
 }
 
 async function waitForLocalOllama(onStatus = settingsOllamaInstallStatus) {
@@ -561,7 +586,6 @@ async function installOllamaModel(selected, onStatus, onProgress) {
     try {
       return await installOllamaModelInBrowser(selected, onStatus, onProgress);
     } finally {
-      hideOllamaDownloadStatus();
       ollamaInstallInProgress = false;
     }
   }
@@ -612,7 +636,6 @@ async function installOllamaModel(selected, onStatus, onProgress) {
     if (ollamaInstallCancellationRequested) throwIfOllamaSetupCancelled();
     throw error;
   } finally {
-    hideOllamaDownloadStatus();
     stopInstallListening();
     stopPullListening();
     ollamaInstallInProgress = false;
@@ -1755,7 +1778,7 @@ function renderOllamaSetup() {
   }
 
   if (settingsOllamaMemoryBytes) {
-    const memoryGb = Math.round(settingsOllamaMemoryBytes / 1_000_000_000);
+    const memoryGb = Math.round(memoryGiB(settingsOllamaMemoryBytes));
     ui.ollamaSetupMemory.textContent = `Память: около ${memoryGb} ГБ.`;
   } else {
     ui.ollamaSetupMemory.textContent = 'Объём памяти не определён.';
@@ -1799,25 +1822,48 @@ function renderOllamaSetup() {
 function setSettingsOllamaInstallBusy(busy) {
   ui.installOllamaFromSettings.disabled = busy || !allModelsForRecommendation(settingsOllamaRecommendation).length;
   ui.ollamaSetupModel.disabled = busy || !allModelsForRecommendation(settingsOllamaRecommendation).length;
-  ui.closeOllamaSetup.disabled = busy;
+  ui.closeOllamaSetup.disabled = false;
   ui.cancelOllamaSetup.hidden = !busy;
   ui.cancelOllamaSetup.disabled = ollamaInstallCancellationRequested;
-  ui.ollamaSetupProgress.hidden = !busy;
-  ui.ollamaSetupProgress.removeAttribute('value');
-  ui.ollamaSetupProgress.value = 0;
+  if (busy) {
+    ui.ollamaSetupProgress.hidden = false;
+    ui.ollamaSetupProgress.removeAttribute('value');
+    ui.ollamaSetupProgress.value = 0;
+  }
 }
 
-function settingsOllamaInstallStatus(message, stateName = 'loading') {
+function settingsOllamaInstallStatus(message, stateName = 'loading', headerMessage = message) {
   ui.ollamaSetupStatus.textContent = message;
   ui.ollamaSetupStatus.dataset.state = stateName;
   ui.ollamaSetupStatus.hidden = false;
+  if (ollamaSetupStage !== 'pull' || stateName !== 'loading') {
+    ui.ollamaDownloadLabel.textContent = headerMessage;
+    if (stateName !== 'loading'
+      || !['install', 'pull'].includes(ollamaSetupStage)
+      || !ui.ollamaDownloadEta.textContent) {
+      renderOllamaProgressFeedback(
+        { progress: ui.ollamaDownloadProgress, percent: ui.ollamaDownloadPercent, eta: ui.ollamaDownloadEta },
+        { progress: ui.ollamaSetupProgress, eta: ui.ollamaSetupEta },
+        stateName === 'loading'
+          ? { percent: null, eta: 'Время неизвестно' }
+          : { ...(stateName === 'ready' ? { percent: 100 } : {}), eta: '' },
+      );
+    }
+    ui.ollamaDownloadStatus.hidden = false;
+  }
+  if (stateName === 'error' || stateName === 'cancelled') {
+    ui.ollamaDownloadProgress.hidden = true;
+    ui.ollamaSetupProgress.hidden = true;
+    ui.ollamaDownloadPercent.textContent = '';
+  }
 }
 
 async function cancelOllamaSetupFromSettings() {
   if (!ollamaInstallInProgress || ollamaInstallCancellationRequested) return;
   ollamaInstallCancellationRequested = true;
+  ollamaSetupStage = 'cancel';
   ui.cancelOllamaSetup.disabled = true;
-  settingsOllamaInstallStatus('Останавливаем скачивание и установку…');
+  settingsOllamaInstallStatus('Останавливаем скачивание и установку…', 'loading', 'Останавливаем установку…');
   if (!isTauri && isBrowserOllamaDev) {
     ollamaBrowserInstallController?.abort();
     return;
@@ -1861,15 +1907,45 @@ async function installOllamaFromSettings() {
   if (!selected) return;
 
   ollamaInstallCancellationRequested = false;
+  ollamaProgressEstimate = null;
+  ollamaSetupStage = '';
+  renderOllamaProgressFeedback(
+    { progress: ui.ollamaDownloadProgress, percent: ui.ollamaDownloadPercent, eta: ui.ollamaDownloadEta },
+    { progress: ui.ollamaSetupProgress, eta: ui.ollamaSetupEta },
+    { percent: null, eta: 'Время неизвестно' },
+  );
   setSettingsOllamaInstallBusy(true);
   ui.ollamaSetupStatus.hidden = true;
   try {
     const installedStatus = await installOllamaModel(selected, settingsOllamaInstallStatus, (payload, type) => {
+      ollamaSetupStage = type;
       ui.ollamaSetupProgress.hidden = false;
       if ((type === 'install' || type === 'pull') && Number.isFinite(payload.total) && payload.total > 0 && Number.isFinite(payload.completed)) {
         ui.ollamaSetupProgress.value = Math.min(100, Math.max(0, payload.completed / payload.total * 100));
       } else {
         ui.ollamaSetupProgress.removeAttribute('value');
+      }
+      if (type === 'install') {
+        ui.ollamaDownloadLabel.textContent = payload.message || 'Устанавливаем Ollama…';
+        const total = Number(payload.total);
+        const completed = Number(payload.completed);
+        const estimate = estimateRemainingSeconds({
+          total,
+          completed,
+          now: Date.now(),
+          layer: 'ollama-installer',
+          previous: ollamaProgressEstimate,
+        });
+        ollamaProgressEstimate = estimate.next;
+        const percent = Number.isFinite(total) && total > 0 && Number.isFinite(completed)
+          ? Math.min(100, Math.max(0, completed / total * 100))
+          : null;
+        renderOllamaProgressFeedback(
+          { progress: ui.ollamaDownloadProgress, percent: ui.ollamaDownloadPercent, eta: ui.ollamaDownloadEta },
+          { progress: ui.ollamaSetupProgress, eta: ui.ollamaSetupEta },
+          { percent, eta: formatRemainingTime(estimate.seconds) },
+        );
+        ui.ollamaDownloadStatus.hidden = false;
       }
     });
     codexSettings.provider = 'ollama';
@@ -1887,17 +1963,19 @@ async function installOllamaFromSettings() {
     };
     renderOllamaStatus();
     customSelects.refresh();
-    settingsOllamaInstallStatus(`Ollama и ${selected.name} готовы. ИИ-анализ не запускается сам; при включённом ИИ новые документы будут обрабатываться локально.`, 'ready');
+    settingsOllamaInstallStatus(`Ollama и ${selected.name} готовы. ИИ-анализ не запускается сам; при включённом ИИ новые документы будут обрабатываться локально.`, 'ready', 'Готово: Ollama и модель установлены.');
+    ollamaSetupStage = 'done';
     ui.ollamaSetupProgress.hidden = false;
     ui.ollamaSetupProgress.value = 100;
   } catch (error) {
     if (ollamaInstallCancellationRequested || error?.name === 'AbortError') {
-      settingsOllamaInstallStatus('Операция остановлена. Ollama могла успеть установиться; модель можно скачать повторно.', 'cancelled');
+      settingsOllamaInstallStatus('Операция остановлена. Ollama могла успеть установиться; модель можно скачать повторно.', 'cancelled', 'Операция остановлена.');
     } else {
-      settingsOllamaInstallStatus(ollamaInstallFailureMessage(error), 'error');
+      settingsOllamaInstallStatus(ollamaInstallFailureMessage(error), 'error', `Ошибка: ${messageFrom(error)}`);
     }
   } finally {
     setSettingsOllamaInstallBusy(false);
+    ollamaSetupStage = 'done';
     renderOllamaSetup();
   }
 }
@@ -4253,16 +4331,14 @@ ui.headerAiStatus.addEventListener('click', () => {
   });
 });
 ui.openOllamaSetup.addEventListener('click', async () => {
+  ui.settingsDialog.close();
   ui.ollamaSetupDialog.showModal();
   await loadSettingsOllamaRecommendation();
   renderOllamaSetup();
 });
 ui.closeOllamaSetup.addEventListener('click', () => ui.ollamaSetupDialog.close());
 ui.ollamaSetupDialog.addEventListener('click', (event) => {
-  if (event.target === ui.ollamaSetupDialog && !ui.closeOllamaSetup.disabled) ui.ollamaSetupDialog.close();
-});
-ui.ollamaSetupDialog.addEventListener('cancel', (event) => {
-  if (ui.closeOllamaSetup.disabled || ollamaInstallInProgress) event.preventDefault();
+  if (event.target === ui.ollamaSetupDialog) ui.ollamaSetupDialog.close();
 });
 ui.closeWelcome.addEventListener('click', closeWelcome);
 ui.openWelcome.addEventListener('click', () => showWelcome(true));

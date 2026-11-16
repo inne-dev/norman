@@ -1542,6 +1542,10 @@ main {
   border-radius: 7px;
 }
 
+.settings-theme .settings-modal-options {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .theme-choice {
   position: relative;
   min-width: 0;
@@ -1562,6 +1566,10 @@ main {
   border: 1px solid transparent;
   border-radius: 4px;
   font-size: 12px;
+}
+
+.settings-theme .theme-choice span {
+  white-space: nowrap;
 }
 
 .theme-choice input:checked + span {
@@ -2172,6 +2180,8 @@ main {
   overflow: hidden;
   scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
   scrollbar-width: thin;
+  container-name: findings;
+  container-type: inline-size;
 }
 
 .panel-heading {
@@ -2411,6 +2421,22 @@ p {
   align-items: center;
   flex: 0 0 auto;
   gap: 10px;
+}
+
+@container findings (max-width: 320px) {
+  .findings-heading {
+    flex-wrap: wrap;
+  }
+
+  .findings-heading-title {
+    flex-basis: 100%;
+  }
+
+  .findings-heading-tools {
+    max-width: 100%;
+    flex-wrap: wrap;
+    margin-left: auto;
+  }
 }
 
 .report-pdf-button {
