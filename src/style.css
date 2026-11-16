@@ -2180,6 +2180,8 @@ main {
   overflow: hidden;
   scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
   scrollbar-width: thin;
+  container-name: findings;
+  container-type: inline-size;
 }
 
 .panel-heading {
@@ -2419,6 +2421,22 @@ p {
   align-items: center;
   flex: 0 0 auto;
   gap: 10px;
+}
+
+@container findings (max-width: 320px) {
+  .findings-heading {
+    flex-wrap: wrap;
+  }
+
+  .findings-heading-title {
+    flex-basis: 100%;
+  }
+
+  .findings-heading-tools {
+    max-width: 100%;
+    flex-wrap: wrap;
+    margin-left: auto;
+  }
 }
 
 .report-pdf-button {
