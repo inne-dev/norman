@@ -18,9 +18,25 @@ export function aiConfidenceLevel(value) {
 }
 
 export function findingConfidenceLevel(finding) {
-  return isAiFinding(finding) ? aiConfidenceLevel(finding.aiConfidence) : 'possible';
+  if (!isAiFinding(finding)) return 'possible';
+  const confidence = aiConfidenceLevel(finding.aiConfidence);
+  return confidence === 'likely-false' && !hasValidRejectionReason(finding) ? 'low' : confidence;
 }
 
 export function isRejectedFinding(finding) {
   return findingConfidenceLevel(finding) === 'likely-false';
+}
+
+function hasValidRejectionReason(finding) {
+  if (finding?.aiError || finding?.aiErrorKind) return false;
+  const rawReason = String(finding?.aiRejectionReason || '').trim().toLocaleLowerCase('ru-RU');
+  const reason = rawReason
+    .replace(/^(?:причина(?: отсева)?|reason)\s*:\s*/u, '')
+    .replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')
+    .trim();
+  return reason !== '' && ![
+    'none', 'null', 'n/a', 'na', 'no reason', 'no reason provided', 'not provided', 'not specified',
+    'нет', 'н/д', 'нд', 'пусто', 'нет причины', 'не указано', 'не указана', 'неизвестно',
+    'отсутствует', 'причина отсутствует',
+  ].includes(reason);
 }

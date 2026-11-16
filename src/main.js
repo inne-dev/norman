@@ -256,6 +256,39 @@ if (isTauri && currentPlatform === 'macos') {
   });
 }
 
+if (isTauri && currentPlatform === 'windows') {
+  document.documentElement.classList.add('windows-custom-titlebar');
+  const appWindow = getCurrentWindow();
+  const headerActions = document.querySelector('.header-actions');
+  const updateHeaderActionSpace = () => {
+    document.documentElement.style.setProperty(
+      '--header-actions-width',
+      `${Math.ceil(headerActions.getBoundingClientRect().width)}px`,
+    );
+  };
+  new ResizeObserver(updateHeaderActionSpace).observe(headerActions);
+  updateHeaderActionSpace();
+  const windowActions = {
+    minimize: () => appWindow.minimize(),
+    maximize: () => appWindow.toggleMaximize(),
+    close: () => appWindow.close(),
+  };
+  document.querySelectorAll('[data-window-action]').forEach((button) => {
+    button.addEventListener('click', () => {
+      void windowActions[button.dataset.windowAction]?.().catch(() => {});
+    });
+  });
+  document.addEventListener('mousedown', (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (event.button !== 0 || event.clientY > 40 || target?.closest('button, a, input, select, textarea')) return;
+    if (event.detail === 2) {
+      void appWindow.toggleMaximize().catch(() => {});
+      return;
+    }
+    void appWindow.startDragging().catch(() => {});
+  });
+}
+
 function loadCodexSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(CODEX_STORAGE_KEY) || '{}');
@@ -446,6 +479,9 @@ function formatDownloadedBytes(value) {
 
 function ollamaInstallFailureMessage(error) {
   const detail = messageFrom(error);
+  if (/redirect target not allowed|resolves to non-public/i.test(detail)) {
+    return `Не удалось загрузить модель: адрес хранилища разрешается в непубличный IP, и Ollama блокирует перенаправление. Проверьте настройки DNS, VPN или прокси. После исправления нажмите «Повторить установку». Детали: ${detail}`;
+  }
   return `Не удалось настроить Ollama и загрузить модель. ${detail} Нажмите «Повторить установку»: приложение проверит состояние Ollama и повторит загрузку модели. Если ошибка повторится, проверьте подключение к интернету и свободное место.`;
 }
 
@@ -2327,9 +2363,11 @@ async function refreshYandexStatus() {
 
 function renderAiAnalysisNote() {
   let message = '';
-  if (state.aiAnalysis === 'error' || state.aiAnalysis === 'unavailable') message = state.aiAnalysisMessage;
+  if (state.aiAnalysis === 'error' || state.aiAnalysis === 'unavailable' || state.aiAnalysis === 'done') {
+    message = state.aiAnalysisMessage;
+  }
   ui.aiAnalysisMessage.textContent = message;
-  ui.aiAnalysisNote.dataset.state = state.aiAnalysis;
+  ui.aiAnalysisNote.dataset.state = state.aiAnalysis === 'done' && message ? 'warning' : state.aiAnalysis;
   ui.aiAnalysisNote.hidden = !message;
   ui.showPartialAiReview.hidden = state.aiAnalysis !== 'error'
     || state.aiProgress?.phase !== 'discover'
@@ -2665,9 +2703,9 @@ function findingRowData(finding) {
   const location = state.document && isValidFinding(finding)
     ? articleAndPart(state.document.text, finding.start, finding.end)
     : 'Источник';
-  const rejectedByAi = aiConfidenceLevel(finding.aiConfidence) === 'likely-false';
+  const rejectedByAi = findingConfidenceLevel(finding) === 'likely-false';
   const rejectionReason = rejectedByAi
-    ? String(finding.aiRejectionReason || finding.aiRationale || '').trim()
+    ? String(finding.aiRejectionReason || '').trim()
     : '';
   const standardReason = String(finding.reason || '').trim();
   const aiRationale = aiFinding && !rejectedByAi
@@ -3007,7 +3045,7 @@ function renderAiReviewDialog() {
   const isChecking = verifyStatus === 'active' || verifyStatus === 'queued';
   const watching = ui.aiReviewLiveStatus.dataset.watching === 'true';
   const providerLabel = aiProviderLabel(finding.aiProvider || codexSettings.provider);
-  const confidence = aiConfidenceLevel(finding.aiConfidence);
+  const confidence = findingConfidenceLevel(finding);
   const hasResult = finding.aiConfidence != null || Boolean(finding.aiRationale || finding.aiRejectionReason);
   ui.aiReviewTitle.textContent = `${failed ? 'Сбой проверки' : isChecking ? 'Проверка' : 'Оценка'} · ${providerLabel}`;
   ui.aiReviewExcerpt.textContent = finding.excerpt || 'Фрагмент не сохранён.';
@@ -3017,7 +3055,7 @@ function renderAiReviewDialog() {
   ui.aiReviewResultSection.hidden = !hasResult;
   ui.aiReviewConfidenceMarker.textContent = findingConfidenceMarker(confidence);
   ui.aiReviewResultSection.querySelector('.ai-review-result').dataset.confidence = confidence;
-  ui.aiReviewConfidence.textContent = hasResult ? aiReviewConfidenceLabel(finding.aiConfidence) : 'Проверяется';
+  ui.aiReviewConfidence.textContent = hasResult ? aiReviewConfidenceLabel(confidence) : 'Проверяется';
   ui.aiReviewDecision.textContent = !hasResult
     ? 'Ожидайте завершения проверки сигнала.'
     : confidence === 'likely-false'
@@ -3218,9 +3256,19 @@ function openAiReviewResults() {
   const findings = state.findings.filter(isAiFinding);
   if (!findings.length) return;
 
+  renderAiReviewResults();
+  ui.aiReviewSingleContent.hidden = true;
+  ui.aiReviewResultsList.hidden = false;
+  ui.aiReviewTitle.textContent = 'Результаты проверки ИИ';
+  ui.aiReviewDialog.showModal();
+}
+
+function renderAiReviewResults() {
+  const tab = tabById(state.activeId);
+  const findings = state.findings.filter(isAiFinding);
   ui.aiReviewResultsList.replaceChildren(...findings.map((finding, index) => {
     const data = findingRowData(finding);
-    const confidence = aiConfidenceLevel(finding.aiConfidence);
+    const confidence = findingConfidenceLevel(finding);
     const item = document.createElement('li');
     item.className = 'ai-review-result-card';
 
@@ -3235,7 +3283,7 @@ function openAiReviewResults() {
     const result = document.createElement('div');
     result.className = 'ai-review-result';
     const resultLabel = document.createElement('strong');
-    resultLabel.textContent = aiReviewConfidenceLabel(finding.aiConfidence);
+    resultLabel.textContent = aiReviewConfidenceLabel(confidence);
     const decision = document.createElement('p');
     decision.className = 'ai-review-decision';
     decision.textContent = confidence === 'likely-false'
@@ -3265,13 +3313,88 @@ function openAiReviewResults() {
       || 'Рассуждение не сохранено.';
     reasoning.append(summary, rationale);
 
-    item.append(title, excerpt, result, reasoning);
+    item.append(title, excerpt, result);
+    appendAiFindingError(item, finding, tab);
+    item.append(reasoning);
     return item;
   }));
-  ui.aiReviewSingleContent.hidden = true;
-  ui.aiReviewResultsList.hidden = false;
-  ui.aiReviewTitle.textContent = 'Результаты проверки ИИ';
-  ui.aiReviewDialog.showModal();
+}
+
+function appendAiFindingError(container, finding, tab = tabById(state.activeId)) {
+  const message = String(finding.aiError || '').trim();
+  if (!message) return;
+
+  const failure = document.createElement('div');
+  failure.className = 'ai-review-failure';
+  const error = document.createElement('p');
+  error.className = 'ai-review-error';
+  error.setAttribute('role', 'alert');
+  error.textContent = message;
+  failure.append(error);
+  if (finding.aiErrorKind === 'format' && finding.aiProvider === 'ollama' && isTauri) {
+    failure.append(createAiFormatRetryButton(finding, tab));
+  }
+  container.append(failure);
+}
+
+function createAiFormatRetryButton(finding, tab = tabById(state.activeId)) {
+  const retrying = Boolean(tab?.aiFormatRetries?.has(String(finding.id || '')));
+  const button = document.createElement('button');
+  button.className = 'ai-format-retry-button';
+  button.type = 'button';
+  button.title = retrying ? 'Повторная попытка…' : 'Попробовать привести к ожидаемому формату';
+  button.setAttribute('aria-label', 'Попробовать привести к ожидаемому формату');
+  button.setAttribute('aria-busy', String(retrying));
+  button.disabled = retrying;
+
+  const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  icon.setAttribute('viewBox', '0 0 24 24');
+  icon.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', 'M20 7v5h-5M19 12a7 7 0 1 1-2.05-4.95L20 10');
+  icon.append(path);
+  button.append(icon);
+  button.addEventListener('click', () => retryAiFindingFormat(tab?.id, finding.id));
+  return button;
+}
+
+async function retryAiFindingFormat(tabId, findingId) {
+  if (!isTauri || !tabId || !findingId) return;
+  const tab = tabById(tabId);
+  const id = String(findingId);
+  const finding = tab?.findings.find((entry) => String(entry.id || '') === id);
+  if (!tab?.document || !finding || finding.aiErrorKind !== 'format'
+    || finding.aiProvider !== 'ollama') return;
+
+  tab.aiFormatRetries ||= new Set();
+  if (tab.aiFormatRetries.has(id)) return;
+  tab.aiFormatRetries.add(id);
+  if (ui.aiReviewDialog.open && tab.id === state.activeId) renderAiReviewResults();
+  reflectAnalysisTab(tab);
+
+  try {
+    const result = await invoke('retry_ai_finding_format', {
+      text: tab.document.text,
+      finding,
+      model: codexSettings.ollamaModel,
+      parallelProcesses: codexSettings.parallelProcesses,
+      baseUrl: codexSettings.ollamaBaseUrl.trim() || null,
+    });
+    const updated = result?.finding || result;
+    if (!updated || String(updated.id || '') !== id) {
+      throw new Error('Ollama не вернула результат для выбранного сигнала.');
+    }
+    appendFindings([{ ...updated, aiProvider: 'ollama' }], tab);
+  } catch (error) {
+    const message = formatAiReviewError(error);
+    tab.findings = tab.findings.map((entry) => String(entry.id || '') === id
+      ? { ...entry, aiError: message, aiErrorKind: 'provider' }
+      : entry);
+  } finally {
+    tab.aiFormatRetries.delete(id);
+    reflectAnalysisTab(tab);
+    if (ui.aiReviewDialog.open && tab.id === state.activeId) renderAiReviewResults();
+  }
 }
 
 function aiProviderLabel(provider) {
@@ -3397,7 +3520,7 @@ function createFindingRow(finding, key, verifyStatus, data = findingRowData(find
   button.dataset.findingId = key;
   if (data.aiFinding) {
     item.dataset.origin = data.origin;
-    item.dataset.aiConfidence = aiConfidenceLevel(finding.aiConfidence);
+    item.dataset.aiConfidence = data.confidence;
   }
   const expanded = key === state.selectedId;
   item.dataset.expanded = String(expanded);
@@ -3452,6 +3575,7 @@ function createFindingRow(finding, key, verifyStatus, data = findingRowData(find
     aiExplanation.append(label, rationale);
     details.append(aiExplanation);
   }
+  appendAiFindingError(details, finding);
   item.append(button, details);
   syncFindingReviewControl(item, key, finding, data, verifyStatus);
   setFindingVerifyStatus(item, finding, data, verifyStatus);
@@ -3830,6 +3954,12 @@ async function executeAiReview(tab, token, parallelProcesses) {
       try {
         unlisten.push(await listen('ai-analysis-progress', (event) => onProgress(event.payload || {})));
         unlisten.push(await listen('ai-finding', (event) => onFinding(event.payload?.finding)));
+        unlisten.push(await listen('ai-analysis-warning', (event) => {
+          const warning = event.payload || {};
+          if (warning.analysisId !== tab.analysisPauseId || typeof warning.message !== 'string') return;
+          tab.aiAnalysisMessage = warning.message;
+          reflectAnalysisTab(tab);
+        }));
         unlisten.push(await listen('ai-review-update', (event) => updateAiReviewProgress(tab, token, event.payload || {})));
         unlisten.push(await listen('ai-review-stream', (event) => updateAiReviewStream(tab, token, event.payload || {})));
       } catch {
@@ -3861,7 +3991,6 @@ async function executeAiReview(tab, token, parallelProcesses) {
     tab.findings = mergeFindings(tab.findings, resultFindings.map((finding) => ({ ...finding, aiProvider: provider })));
     tab.aiAnalysis = 'done';
     tab.aiProgress = null;
-    tab.aiAnalysisMessage = '';
   } catch (error) {
     if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
     tab.aiAnalysis = 'error';
