@@ -18,6 +18,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+base64 = "0.22"
 ego-tree = "0.11"
 encoding_rs = "0.8"
 office_oxide = "0.1.16"
