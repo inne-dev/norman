@@ -23,7 +23,7 @@ use std::os::unix::process::CommandExt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use url::{Host, Url};
 
 use super::{
@@ -40,6 +40,8 @@ const MAX_AI_FINDINGS: usize = 30;
 const MAX_AI_DISCOVERIES: usize = 30;
 const MAX_PROMPT_BYTES: usize = 600 * 1024;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_NORMAN_PROMPT_BYTES: usize = 64 * 1024;
+const MAX_NORMAN_REQUEST_BYTES: usize = 128 * 1024;
 const STRUCTURED_FORMAT_ERROR_PREFIX: &str = "\0norman-structured-format:";
 const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STREAM_LINE_BYTES: usize = 512 * 1024;
@@ -195,6 +197,11 @@ pub(super) struct YandexStatus {
 enum AiProvider {
     Codex,
     ClaudeCode,
+    Norman {
+        base_url: Url,
+        token: Arc<str>,
+        client: reqwest::blocking::Client,
+    },
     Ollama {
         base_url: Url,
         client: reqwest::blocking::Client,
@@ -328,6 +335,19 @@ struct ReviewTarget<'a> {
     end: usize,
     context_before_excerpt: &'a str,
     context_after_excerpt: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    citing_block: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    referenced_blocks: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoveryReferenceContext {
+    excerpt: String,
+    start: usize,
+    citing_block: Option<String>,
+    referenced_blocks: Vec<String>,
 }
 
 struct CapturedOutput {
@@ -508,6 +528,50 @@ pub(super) async fn analyze_with_codex(
     })
     .await
     .map_err(|_| "Обработка Codex CLI была прервана.".to_string())?
+}
+
+#[tauri::command]
+pub(super) async fn analyze_with_norman(
+    app: tauri::AppHandle,
+    analysis_id: String,
+    server_url: String,
+    text: String,
+    findings: Vec<Finding>,
+    parallel_processes: Option<Value>,
+) -> Result<Vec<Finding>, String> {
+    let base_url = super::norman::validate_server_url(&server_url)?;
+    let token = app
+        .state::<super::norman::NormanSession>()
+        .token_for(&base_url)?
+        .ok_or_else(|| "Войдите в аккаунт Norman на выбранном сервере в настройках.".to_string())?;
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "Не удалось подготовить соединение с сервером Norman.".to_string())?;
+    let provider = AiProvider::Norman {
+        base_url,
+        token: Arc::from(token),
+        client,
+    };
+    let parallel_processes = normalize_parallel_processes(parallel_processes);
+    let control = super::analysis_pause_control(&app, &analysis_id)?;
+    let worker_analysis_id = analysis_id.clone();
+    tokio::task::spawn_blocking(move || {
+        analyze_with_ai_inner(
+            &app,
+            &control,
+            &worker_analysis_id,
+            &text,
+            findings,
+            None,
+            None,
+            parallel_processes,
+            provider,
+        )
+    })
+    .await
+    .map_err(|_| "Обработка Norman была прервана.".to_string())?
 }
 
 #[tauri::command]
@@ -929,6 +993,7 @@ fn analyze_with_ai_inner(
                 "уровень рассуждения",
             )?),
         ),
+        AiProvider::Norman { .. } => ("norman".into(), None),
         AiProvider::Ollama { base_url, client } => {
             let status = query_ollama_status(base_url, client)?;
             if !status.available {
@@ -981,6 +1046,7 @@ fn analyze_with_ai_inner(
     let provider_name = match &provider {
         AiProvider::Codex => "Codex",
         AiProvider::ClaudeCode => "Claude Code",
+        AiProvider::Norman { .. } => "Norman",
         AiProvider::Ollama { .. } => "Ollama",
         AiProvider::Cloudru { .. } => "Cloud.ru",
         AiProvider::Yandex { .. } => "Yandex AI Studio",
@@ -1035,8 +1101,13 @@ fn analyze_with_ai_inner(
         return Err("Каталог правил для AI-анализа пуст.".into());
     }
 
-    for finding in &findings {
+    for finding in &mut findings {
         validate_deterministic_finding(text, finding, &rules)?;
+        finding.internal_reference_context = if finding.rule_id == "AE-REF-02" {
+            super::internal_reference_context(text, finding.start, &finding.excerpt)
+        } else {
+            None
+        };
     }
     findings.sort_by(|left, right| {
         (left.start, left.end, &left.rule_id).cmp(&(right.start, right.end, &right.rule_id))
@@ -1063,6 +1134,7 @@ fn analyze_with_ai_inner(
             AiProvider::Ollama { .. } => OLLAMA_TOTAL_RUN_TIMEOUT,
             AiProvider::Codex
             | AiProvider::ClaudeCode
+            | AiProvider::Norman { .. }
             | AiProvider::Cloudru { .. }
             | AiProvider::Yandex { .. } => TOTAL_RUN_TIMEOUT,
         };
@@ -1231,9 +1303,25 @@ fn analyze_with_ai_inner(
                     })
                     .cloned()
                     .collect::<Vec<_>>();
+                let reference_contexts = chunk_findings
+                    .iter()
+                    .filter(|finding| finding.rule_id == "AE-REF-02")
+                    .map(|finding| {
+                        let spans = finding.internal_reference_context.clone().unwrap_or_default();
+                        let (citing_block, referenced_blocks) =
+                            super::internal_reference_blocks(text, &spans);
+                        DiscoveryReferenceContext {
+                            excerpt: finding.excerpt.clone(),
+                            start: finding.start,
+                            citing_block,
+                            referenced_blocks,
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 let prompt = discovery_prompt(
                     &text[chunk.byte_start..chunk.byte_end],
                     &chunk_findings,
+                    &reference_contexts,
                     &partition_factors,
                     &partition.rule_factors,
                     job.chunk_index + 1,
@@ -1480,6 +1568,14 @@ fn verification_target<'a>(
         .nth(799)
         .map(|(byte, character)| end + byte + character.len_utf8())
         .unwrap_or(text.len());
+    let reference_context = if rule.id == "AE-REF-02" {
+        super::internal_reference_context(text, finding.start, &finding.excerpt)
+            .unwrap_or_default()
+    } else {
+        super::InternalReferenceContext::default()
+    };
+    let (citing_block, referenced_blocks) =
+        super::internal_reference_blocks(text, &reference_context);
     Ok(ReviewTarget {
         rule_id: &rule.id,
         title: &rule.title,
@@ -1491,6 +1587,8 @@ fn verification_target<'a>(
         end: finding.end,
         context_before_excerpt: &text[context_start..start],
         context_after_excerpt: &text[end..context_end],
+        citing_block,
+        referenced_blocks,
     })
 }
 
@@ -1512,6 +1610,7 @@ fn verification_prompt(
 Верни ответ строго по JSON-схеме. aiRationale — одно короткое предложение по-русски. Отсекай находку только если уверен, что фактор не применим: тогда одновременно установи signalSupported=false и aiConfidence=likely_false и укажи причину. Если есть сомнение, не отсекай: установи signalSupported=true и aiConfidence=low. Не сочетай signalSupported=true с aiConfidence=likely_false. Возможный сигнал — это не юридическое заключение.
 
 Если rule.id — AE-REF-01, отличай конкретную отсылку к этой же статье от отсылки к неуказанным правилам по формулировке целиком и ближайшему контексту.
+Если rule.id — AE-REF-02, используй полные citingBlock и referencedBlocks, если они найдены. Одной отсылки или различия формулировок недостаточно: оцени, может ли неоднозначность или противоречие привести к разным юридически значимым решениям в одной и той же ситуации. Если referencedBlocks пусты, считай цель отсылки неразрешённой по извлечённому тексту и не додумывай её содержание.
 
 Правило (JSON):
 {rule_json}
@@ -1700,6 +1799,7 @@ fn ai_text_chunks(text: &str) -> Vec<AiTextChunk> {
 fn discovery_prompt(
     text: &str,
     findings: &[Finding],
+    reference_contexts: &[DiscoveryReferenceContext],
     ai_factors: &AiFactorCatalog,
     eligible_rule_factors: &[String],
     chunk_index: usize,
@@ -1708,7 +1808,10 @@ fn discovery_prompt(
 ) -> Result<String, String> {
     let text_json = serde_json::to_string(text)
         .map_err(|_| "Не удалось подготовить текст документа для AI-анализа.".to_string())?;
-    let findings_json = serde_json::to_string(findings)
+    let findings_json = serde_json::to_string(&serde_json::json!({
+        "findings": findings,
+        "referenceContexts": reference_contexts,
+    }))
         .map_err(|_| "Не удалось подготовить находки для AI-анализа.".to_string())?;
     let eligible_rule_factors_json = serde_json::to_string(eligible_rule_factors)
         .map_err(|_| "Не удалось подготовить факторы правил для AI-анализа.".to_string())?;
@@ -1827,6 +1930,7 @@ fn sanitize_provider_secret(provider: &AiProvider, error: String) -> String {
         AiProvider::Cloudru { api_key, .. } | AiProvider::Yandex { api_key, .. } => {
             Some(api_key.as_ref())
         }
+        AiProvider::Norman { token, .. } => Some(token.as_ref()),
         AiProvider::Codex | AiProvider::ClaudeCode | AiProvider::Ollama { .. } => None,
     };
     match secret {
@@ -2036,6 +2140,7 @@ fn validate_discovery_candidate(
         ai_rejection_reason: None,
         ai_error: None,
         ai_error_kind: None,
+        internal_reference_context: None,
     }))
 }
 
@@ -2405,6 +2510,7 @@ fn run_structured_prompt_once<T: for<'de> Deserialize<'de>>(
     let provider_timeout = match provider {
         AiProvider::Codex => CODEX_TOTAL_CALL_TIMEOUT,
         AiProvider::ClaudeCode => CLAUDE_TOTAL_CALL_TIMEOUT,
+        AiProvider::Norman { .. } => PER_RUN_TIMEOUT,
         AiProvider::Cloudru { .. } | AiProvider::Yandex { .. } => PER_RUN_TIMEOUT,
         AiProvider::Ollama { .. } => OLLAMA_PER_RUN_TIMEOUT,
     };
@@ -2429,6 +2535,20 @@ fn run_structured_prompt_once<T: for<'de> Deserialize<'de>>(
             timeout,
             control,
             on_stream,
+        ),
+        AiProvider::Norman {
+            base_url,
+            token,
+            client,
+        } => run_norman_structured_prompt(
+            prompt,
+            schema_path,
+            working_dir,
+            base_url,
+            token,
+            client,
+            timeout,
+            control,
         ),
         AiProvider::Ollama { base_url, .. } => run_ollama_structured_prompt(
             prompt,
@@ -2466,6 +2586,72 @@ fn run_structured_prompt_once<T: for<'de> Deserialize<'de>>(
             on_stream,
         ),
     }
+}
+
+fn run_norman_structured_prompt<T: for<'de> Deserialize<'de>>(
+    prompt: &str,
+    schema_path: &str,
+    working_dir: &Path,
+    base_url: &Url,
+    token: &str,
+    client: &reqwest::blocking::Client,
+    timeout: Duration,
+    control: &super::AnalysisPauseControl,
+) -> Result<T, String> {
+    if control.is_cancelled() {
+        return Err("AI-анализ отменён.".into());
+    }
+    let schema_bytes = fs::read(working_dir.join(schema_path))
+        .map_err(|_| "Не удалось прочитать JSON-схему для Norman.".to_string())?;
+    if prompt.len() > MAX_NORMAN_PROMPT_BYTES || schema_bytes.len() > CLAUDE_MAX_SCHEMA_BYTES {
+        return Err("Запрос к серверу Norman превышает допустимый размер.".into());
+    }
+    let schema: Value = serde_json::from_slice(&schema_bytes)
+        .map_err(|_| "Не удалось прочитать JSON-схему для Norman.".to_string())?;
+    let endpoint = super::norman::api_url(base_url, "ai")?;
+    let request_body = serde_json::to_vec(&json!({ "prompt": prompt, "schema": schema }))
+        .map_err(|_| "Не удалось подготовить запрос к серверу Norman.".to_string())?;
+    if request_body.len() > MAX_NORMAN_REQUEST_BYTES {
+        return Err("Запрос к серверу Norman превышает допустимый размер.".into());
+    }
+    let response = client
+        .post(endpoint)
+        .bearer_auth(token)
+        .timeout(timeout)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(request_body)
+        .send()
+        .map_err(|_| "Не удалось выполнить запрос к серверу Norman. Проверьте подключение.".to_string())?;
+    let status = response.status();
+    if response.content_length().is_some_and(|length| length > MAX_RESPONSE_BYTES as u64) {
+        return Err("Ответ сервера Norman превышает допустимый размер.".into());
+    }
+    let mut bytes = Vec::with_capacity(response.content_length().unwrap_or(0) as usize);
+    response
+        .take((MAX_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Не удалось прочитать ответ сервера Norman.".to_string())?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err("Ответ сервера Norman превышает допустимый размер.".into());
+    }
+    if !status.is_success() {
+        return Err(super::norman::api_error(status, &bytes));
+    }
+    if control.is_cancelled() {
+        return Err("AI-анализ отменён.".into());
+    }
+    let response: NormanAiResponse = serde_json::from_slice(&bytes)
+        .map_err(|_| "Сервер Norman вернул ответ неверного формата.".to_string())?;
+    if response.output.len() > MAX_RESPONSE_BYTES {
+        return Err("Ответ сервера Norman превышает допустимый размер.".into());
+    }
+    serde_json::from_str(&response.output)
+        .map_err(|_| "Ответ сервера Norman не соответствует ожидаемому JSON-формату.".to_string())
+}
+
+#[derive(Deserialize)]
+struct NormanAiResponse {
+    output: String,
 }
 
 fn structured_format_error(message: &str) -> String {
@@ -3999,6 +4185,7 @@ impl AiProvider {
         match self {
             Self::Codex => "Codex",
             Self::ClaudeCode => "Claude Code",
+            Self::Norman { .. } => "Norman",
             Self::Ollama { .. } => "Ollama",
             Self::Cloudru { .. } => "Cloud.ru",
             Self::Yandex { .. } => "Yandex AI Studio",
@@ -4504,6 +4691,7 @@ mod structured_prompt_retry_tests {
                 ai_rejection_reason: None,
                 ai_error: None,
                 ai_error_kind: None,
+                internal_reference_context: None,
             })
             .collect::<Vec<_>>();
         let outcomes = apply_verification_batch(
@@ -4666,6 +4854,7 @@ mod structured_prompt_retry_tests {
             ai_rejection_reason: None,
             ai_error: None,
             ai_error_kind: None,
+            internal_reference_context: None,
         };
         let rules = HashMap::from([(
             "rule".to_string(),

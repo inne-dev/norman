@@ -9,6 +9,8 @@ import { OLLAMA_RECOMMENDATIONS } from './src/ollama-recommendations.js';
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_TEXT_BYTES = 15 * 1024 * 1024;
 const MAX_URL_BYTES = 4 * 1024 * 1024;
+const SUPPORTED_FILE_EXTENSIONS = new Set(['doc', 'dot', 'docx', 'docm', 'dotx', 'dotm', 'odt', 'rtf', 'pdf', 'txt', 'text', 'md', 'csv']);
+const TEXT_FILE_EXTENSIONS = new Set(['txt', 'text', 'md', 'csv']);
 const MAX_URL_REDIRECTS = 5;
 const MAX_URL_TIME_MS = 15_000;
 const MAX_CONVERTER_TIME_MS = 20_000;
@@ -1021,23 +1023,17 @@ async function readConvertedText(outputPath) {
   }
 }
 
-async function loadFile(req) {
-  const filename = validateFilename(req.headers['x-filename']);
+async function loadFileBytes(filename, bytes) {
   const extension = path.extname(filename).slice(1).toLowerCase();
-  const fileFormats = new Set(['doc', 'dot', 'docx', 'docm', 'dotx', 'dotm', 'odt', 'rtf', 'pdf', 'txt', 'text', 'md', 'csv']);
-  if (!fileFormats.has(extension)) {
+  if (!SUPPORTED_FILE_EXTENSIONS.has(extension)) {
     throw new AdapterError(415, 'Этот формат файла не поддерживается.');
   }
-  const bytes = await readRequest(req, MAX_FILE_BYTES);
+  if (bytes.length > MAX_FILE_BYTES) throw new AdapterError(413, 'Файл превышает лимит 25 МБ.');
   if (!bytes.length) throw new AdapterError(422, 'Выбранный файл пуст.');
   const title = filename.slice(0, -(path.extname(filename).length)) || filename;
-  const format = ['txt', 'text', 'md', 'csv'].includes(extension)
-    ? 'txt'
-    : ['doc', 'dot', 'docx', 'docm', 'dotx', 'dotm', 'odt', 'rtf', 'pdf'].includes(extension)
-      ? extension
-      : 'txt';
+  const format = TEXT_FILE_EXTENSIONS.has(extension) ? 'txt' : extension;
 
-  if (['txt', 'text', 'md', 'csv'].includes(extension)) {
+  if (TEXT_FILE_EXTENSIONS.has(extension)) {
     let text;
     try {
       const source = bytes.subarray(bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0);
@@ -1045,7 +1041,12 @@ async function loadFile(req) {
     } catch {
       throw new AdapterError(422, 'Текстовый файл должен быть сохранён в UTF-8.');
     }
-    return { title, url: '', format, text: checkText(normalizeText(text)) };
+    return {
+      title,
+      url: '',
+      format,
+      text: checkText(normalizeText(text)),
+    };
   }
 
   const directory = await mkdtemp(path.join(tmpdir(), 'norman-vite-'));
@@ -1074,10 +1075,89 @@ async function loadFile(req) {
     if (extension === 'pdf' && !normalized) {
       throw new AdapterError(422, 'В PDF нет доступного текста. Для сканов нужен OCR, которого пока нет.');
     }
-    return { title, url: '', format, text: checkText(normalized) };
+    return {
+      title,
+      url: '',
+      format,
+      text: checkText(normalized),
+      previewPdfBase64: extension === 'pdf' ? bytes.toString('base64') : '',
+    };
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+async function loadFile(req) {
+  const filename = validateFilename(req.headers['x-filename']);
+  const bytes = await readRequest(req, MAX_FILE_BYTES);
+  return loadFileBytes(filename, bytes);
+}
+
+function urlDispositionFilename(value) {
+  if (!value) return '';
+  const parameter = value.split(';').slice(1).find((part) => /^\s*filename\*?=/i.test(part));
+  if (!parameter) return '';
+  const separator = parameter.indexOf('=');
+  const isExtended = parameter.slice(0, separator).trim().endsWith('*');
+  let filename = parameter.slice(separator + 1).trim().replace(/^"|"$/g, '');
+  if (isExtended) filename = filename.replace(/^[^']*''/, '');
+  try {
+    return decodeURIComponent(filename);
+  } catch {
+    return filename;
+  }
+}
+
+function urlFileCandidates(url, disposition) {
+  const urlName = new URL(url).pathname.split('/').pop() || '';
+  const dispositionName = urlDispositionFilename(disposition);
+  return [dispositionName, urlName].filter(Boolean);
+}
+
+function urlFileExtension(url, mediaType, disposition) {
+  const names = urlFileCandidates(url, disposition);
+  for (const name of names) {
+    let decoded = name;
+    try { decoded = decodeURIComponent(name); } catch {}
+    const extension = path.extname(decoded).slice(1).toLowerCase();
+    if (SUPPORTED_FILE_EXTENSIONS.has(extension) && !TEXT_FILE_EXTENSIONS.has(extension)) return extension;
+  }
+  const mimeExtensions = {
+    'application/pdf': 'pdf',
+    'application/msword': 'doc',
+    'application/vnd.ms-word': 'doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+    'application/vnd.ms-word.document.macroenabled.12': 'docm',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.template': 'dotx',
+    'application/vnd.ms-word.template.macroenabled.12': 'dotm',
+    'application/vnd.oasis.opendocument.text': 'odt',
+    'application/rtf': 'rtf',
+    'text/rtf': 'rtf',
+    'application/x-rtf': 'rtf',
+    'text/markdown': 'md',
+    'text/csv': 'csv',
+    'application/csv': 'csv',
+  };
+  if (typeof mimeExtensions[mediaType] === 'string') return mimeExtensions[mediaType];
+  for (const name of names) {
+    let decoded = name;
+    try { decoded = decodeURIComponent(name); } catch {}
+    const extension = path.extname(decoded).slice(1).toLowerCase();
+    if (SUPPORTED_FILE_EXTENSIONS.has(extension)) return extension;
+  }
+  return '';
+}
+
+function urlFileName(url, disposition, extension) {
+  const candidates = urlFileCandidates(url, disposition);
+  for (const candidate of candidates) {
+    try {
+      const decoded = decodeURIComponent(candidate);
+      const basename = path.posix.basename(path.win32.basename(decoded));
+      return validateFilename(encodeURIComponent(basename));
+    } catch {}
+  }
+  return `source.${extension}`;
 }
 
 async function readUrl(url) {
@@ -1121,7 +1201,9 @@ async function readUrl(url) {
 
     const contentType = response.headers.get('content-type') ?? '';
     const mediaType = contentType.split(';', 1)[0].trim().toLowerCase();
-    if (!['text/html', 'application/xhtml+xml', 'text/plain'].includes(mediaType)) {
+    const fileExtension = urlFileExtension(current, mediaType, response.headers.get('content-disposition'));
+    const isHtml = ['text/html', 'application/xhtml+xml'].includes(mediaType);
+    if (!['text/html', 'application/xhtml+xml', 'text/plain'].includes(mediaType) && (!fileExtension || isHtml)) {
       await response.body?.cancel();
       throw new AdapterError(415, 'Тип страницы не поддерживается. Нужен HTML, XHTML или обычный текст.');
     }
@@ -1149,7 +1231,12 @@ async function readUrl(url) {
       }
       throw new AdapterError(502, `Не удалось прочитать страницу: ${error.message}`);
     }
-    const page = decodeBytes(Buffer.concat(chunks, size), contentType);
+    const bytes = Buffer.concat(chunks, size);
+    if (fileExtension && !isHtml) {
+      const filename = urlFileName(current, response.headers.get('content-disposition'), fileExtension);
+      return { ...(await loadFileBytes(filename, bytes)), url: current.href };
+    }
+    const page = decodeBytes(bytes, contentType);
     if (mediaType === 'text/plain') {
       const text = checkText(normalizeText(page));
       return { url: current.href, format: 'ТЕКСТ', text };

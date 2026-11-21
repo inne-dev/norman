@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ego_tree::NodeRef;
 use encoding_rs::{Encoding, UTF_8};
 use regex::{Regex, RegexBuilder};
@@ -19,6 +20,7 @@ use thiserror::Error;
 use url::Url;
 
 mod codex;
+mod norman;
 mod ollama_setup;
 mod process;
 
@@ -265,6 +267,10 @@ pub struct LoadedDocument {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_html: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_pdf_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -291,6 +297,8 @@ pub struct Finding {
     pub ai_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_error_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_reference_context: Option<InternalReferenceContext>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -582,6 +590,7 @@ fn get_rule_catalog() -> Result<Vec<RuleSummary>, String> {
 pub fn run() {
     let app = tauri::Builder::default()
         .manage(AnalysisPauseRegistry::default())
+        .manage(norman::NormanSession::default())
         .setup(|app| {
             if cfg!(target_os = "windows") {
                 app.get_webview_window("main")
@@ -622,7 +631,13 @@ pub fn run() {
             codex::get_cloudru_status,
             codex::analyze_with_cloudru,
             codex::get_yandex_status,
-            codex::analyze_with_yandex
+            codex::analyze_with_yandex,
+            codex::analyze_with_norman,
+            norman::norman_register,
+            norman::norman_verify,
+            norman::norman_login,
+            norman::norman_me,
+            norman::norman_logout
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Норман");
@@ -698,8 +713,8 @@ fn load_file_inner(path: &Path) -> AppResult<LoadedDocument> {
     if file.metadata()?.len() > MAX_FILE_BYTES {
         return Err(AppError::FileTooLarge);
     }
-    let (format, raw_text) = if matches!(extension.as_str(), "doc" | "dot") {
-        (extension.as_str(), convert_legacy_doc(path)?)
+    let (format, raw_text, mut preview_pdf_base64) = if matches!(extension.as_str(), "doc" | "dot") {
+        (extension.as_str(), convert_legacy_doc(path)?, None)
     } else {
         let mut bytes = Vec::new();
         file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
@@ -710,16 +725,44 @@ fn load_file_inner(path: &Path) -> AppResult<LoadedDocument> {
             "docx" | "docm" | "dotx" | "dotm" => (
                 extension.as_str(),
                 extract_ooxml(&bytes, "word/document.xml", XmlKind::Word)?,
+                None,
             ),
-            "odt" => ("odt", extract_ooxml(&bytes, "content.xml", XmlKind::OpenDocument)?),
-            "pdf" => ("pdf", extract_pdf(&bytes)?),
-            "rtf" => ("rtf", extract_rtf(&bytes)?),
-            "txt" | "text" | "md" | "csv" => ("txt", extract_plain_text(&bytes)?),
+            "odt" => (
+                "odt",
+                extract_ooxml(&bytes, "content.xml", XmlKind::OpenDocument)?,
+                None,
+            ),
+            "pdf" => ("pdf", extract_pdf(&bytes)?, Some(BASE64.encode(&bytes))),
+            "rtf" => ("rtf", extract_rtf(&bytes)?, None),
+            "txt" | "text" | "md" | "csv" => {
+                ("txt", extract_plain_text(&bytes)?, None)
+            }
             _ => return Err(AppError::UnsupportedFormat),
         }
     };
     let text = normalize_text(&raw_text);
     check_text(&text)?;
+
+    let mut preview_notice = None;
+    if matches!(extension.as_str(), "doc" | "dot" | "docx" | "docm" | "dotx" | "dotm" | "odt" | "rtf")
+        && preview_pdf_base64.is_none()
+    {
+        match convert_preview_pdf_with_libreoffice(path) {
+            Ok(bytes) => preview_pdf_base64 = Some(BASE64.encode(bytes)),
+            Err(AppError::ConverterUnavailable) => {
+                preview_notice = Some(
+                    "Установите LibreOffice, чтобы увидеть исходное форматирование и изображения. Сейчас показан извлечённый текст."
+                        .to_string(),
+                );
+            }
+            Err(_) => {
+                preview_notice = Some(
+                    "Не удалось отобразить исходное форматирование. Сейчас показан извлечённый текст."
+                        .to_string(),
+                );
+            }
+        }
+    }
 
     let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("Документ");
     let title = path
@@ -734,6 +777,8 @@ fn load_file_inner(path: &Path) -> AppResult<LoadedDocument> {
         format: format.into(),
         text,
         preview_html: None,
+        preview_pdf_base64,
+        preview_notice,
     })
 }
 
@@ -769,6 +814,21 @@ fn convert_legacy_doc(path: &Path) -> AppResult<String> {
     convert_legacy_doc_with_libreoffice(path)
 }
 
+fn libreoffice_programs() -> &'static [&'static str] {
+    #[cfg(target_os = "macos")]
+    {
+        &[
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+            "libreoffice",
+            "soffice",
+        ]
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        &["libreoffice", "soffice"]
+    }
+}
+
 fn convert_legacy_doc_with_libreoffice(path: &Path) -> AppResult<String> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -787,7 +847,7 @@ fn convert_legacy_doc_with_libreoffice(path: &Path) -> AppResult<String> {
     let output_path = directory.0.join(converted_name);
     let mut converter_found = false;
 
-    for program in ["libreoffice", "soffice"] {
+    for program in libreoffice_programs() {
         let mut command = Command::new(program);
         command
             .arg("--headless")
@@ -850,6 +910,154 @@ fn read_limited_file(path: &Path) -> AppResult<Vec<u8>> {
     Ok(bytes)
 }
 
+fn convert_preview_pdf_with_libreoffice(path: &Path) -> AppResult<Vec<u8>> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let directory = TemporaryDirectory(
+        env::temp_dir().join(format!("norman-preview-{}-{nonce}", std::process::id())),
+    );
+    fs::create_dir(&directory.0)?;
+    let output_name = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let output_path = directory.0.join(format!("{output_name}.pdf"));
+    let mut converter_found = false;
+
+    for program in libreoffice_programs() {
+        let mut command = Command::new(program);
+        command
+            .arg("--headless")
+            .arg("--convert-to")
+            .arg("pdf")
+            .arg("--outdir")
+            .arg(&directory.0)
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        process::configure_background_command(&mut command);
+        let mut child = match command.spawn() {
+            Ok(child) => {
+                converter_found = true;
+                child
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                converter_found = true;
+                continue;
+            }
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(AppError::ConversionTimeout);
+            }
+            thread::sleep(Duration::from_millis(100));
+        };
+        if status.success() && output_path.is_file() {
+            return read_limited_file(&output_path);
+        }
+    }
+
+    if converter_found {
+        Err(AppError::ConversionFailed)
+    } else {
+        Err(AppError::ConverterUnavailable)
+    }
+}
+
+fn supported_url_file_extension(filename: &str) -> Option<String> {
+    let extension = Path::new(filename)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "doc" | "dot" | "docx" | "docm" | "dotx" | "dotm" | "odt" | "rtf" | "pdf"
+            | "txt" | "text" | "md" | "csv"
+    )
+    .then_some(extension)
+}
+
+fn url_content_disposition_filename(value: &str) -> Option<String> {
+    value.split(';').skip(1).find_map(|parameter| {
+        let (name, value) = parameter.trim().split_once('=')?;
+        let value = value.trim().trim_matches('"');
+        if name.eq_ignore_ascii_case("filename*") {
+            let encoded = value.split_once("''").map_or(value, |(_, value)| value);
+            return url::form_urlencoded::parse(format!("filename={encoded}").as_bytes())
+                .next()
+                .map(|(_, filename)| filename.into_owned());
+        }
+        name.eq_ignore_ascii_case("filename").then(|| value.to_string())
+    })
+}
+
+fn url_mime_file_extension(media_type: &str) -> Option<&'static str> {
+    match media_type {
+        "application/pdf" => Some("pdf"),
+        "application/msword" | "application/vnd.ms-word" => Some("doc"),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => Some("docx"),
+        "application/vnd.ms-word.document.macroenabled.12" => Some("docm"),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.template" => Some("dotx"),
+        "application/vnd.ms-word.template.macroenabled.12" => Some("dotm"),
+        "application/vnd.oasis.opendocument.text" => Some("odt"),
+        "application/rtf" | "text/rtf" | "application/x-rtf" => Some("rtf"),
+        "text/markdown" => Some("md"),
+        "text/csv" | "application/csv" => Some("csv"),
+        _ => None,
+    }
+}
+
+fn url_file_extension(
+    current: &Url,
+    media_type: &str,
+    disposition: Option<&str>,
+) -> Option<String> {
+    let disposition_name = disposition.and_then(url_content_disposition_filename);
+    let url_name = current
+        .path_segments()
+        .and_then(|segments| segments.last())
+        .filter(|name| !name.is_empty());
+    let names = [disposition_name.as_deref(), url_name]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    for name in &names {
+        if let Some(extension) = supported_url_file_extension(name) {
+            if !matches!(extension.as_str(), "txt" | "text" | "md" | "csv") {
+                return Some(extension);
+            }
+        }
+    }
+    if let Some(extension) = url_mime_file_extension(media_type) {
+        return Some(extension.to_string());
+    }
+    names.iter().find_map(|name| supported_url_file_extension(name))
+}
+
+fn load_url_file_inner(bytes: &[u8], extension: &str) -> AppResult<LoadedDocument> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let directory = TemporaryDirectory(
+        env::temp_dir().join(format!("norman-url-{}-{nonce}", std::process::id())),
+    );
+    fs::create_dir(&directory.0)?;
+    let path = directory.0.join(format!("source.{extension}"));
+    fs::write(&path, bytes)?;
+    load_file_inner(&path)
+}
+
 async fn load_url_inner(input: String) -> AppResult<LoadedDocument> {
     let original = validate_url(&input)?;
     let client = reqwest::Client::builder()
@@ -900,6 +1108,11 @@ async fn load_url_inner(input: String) -> AppResult<LoadedDocument> {
             .and_then(|value| value.to_str().ok())
             .unwrap_or("")
             .to_string();
+        let content_disposition = response
+            .headers()
+            .get(reqwest::header::CONTENT_DISPOSITION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         if response
             .content_length()
             .is_some_and(|length| length > MAX_URL_BYTES as u64)
@@ -924,22 +1137,65 @@ async fn load_url_inner(input: String) -> AppResult<LoadedDocument> {
             .unwrap_or_default()
             .trim()
             .to_ascii_lowercase();
-        let (title, text, format, preview_html) = tokio::task::spawn_blocking(move || {
-            let page = decode_web_text(&bytes, &content_type);
-            let (title, text, format, preview_html) = match media_type.as_str() {
-                "text/html" | "application/xhtml+xml" => {
-                    let (title, text) = extract_html_text(&page)?;
-                    (title, text, "html", Some(page))
+        let file_extension = url_file_extension(
+            &current,
+            &media_type,
+            content_disposition.as_deref(),
+        );
+        let is_html = matches!(media_type.as_str(), "text/html" | "application/xhtml+xml");
+        let file_title = content_disposition
+            .as_deref()
+            .and_then(url_content_disposition_filename)
+            .or_else(|| {
+                current
+                    .path_segments()
+                    .and_then(|segments| segments.last())
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string)
+            })
+            .or_else(|| current.host_str().map(str::to_string));
+        let remote_url = current.to_string();
+        let (title, text, format, preview_html, preview_pdf_base64, preview_notice) =
+            tokio::task::spawn_blocking(move || {
+                if file_extension.is_some() && !is_html {
+                    let extension = file_extension
+                        .as_deref()
+                        .ok_or(AppError::UnsupportedWebContent)?;
+                    let mut document = load_url_file_inner(&bytes, extension)?;
+                    if let Some(filename) = file_title {
+                        document.title = Path::new(&filename)
+                            .file_stem()
+                            .and_then(|value| value.to_str())
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or(&filename)
+                            .to_string();
+                    }
+                    return Ok::<_, AppError>((
+                        document.title,
+                        document.text,
+                        document.format,
+                        document.preview_html,
+                        document.preview_pdf_base64,
+                        document.preview_notice,
+                    ));
                 }
-                "text/plain" => (String::new(), normalize_text(&page), "text", None),
-                _ => return Err(AppError::UnsupportedWebContent),
-            };
-            let text = normalize_text(&text);
-            check_text(&text)?;
-            Ok::<_, AppError>((title, text, format, preview_html))
-        })
-        .await
-        .map_err(|_| AppError::WorkerFailed)??;
+                let page = decode_web_text(&bytes, &content_type);
+                let (title, text, format, preview_html) = match media_type.as_str() {
+                    "text/html" | "application/xhtml+xml" => {
+                        let (title, text) = extract_html_text(&page)?;
+                        (title, text, "html".to_string(), Some(page))
+                    }
+                    "text/plain" => {
+                        (String::new(), normalize_text(&page), "text".to_string(), None)
+                    }
+                    _ => return Err(AppError::UnsupportedWebContent),
+                };
+                let text = normalize_text(&text);
+                check_text(&text)?;
+                Ok::<_, AppError>((title, text, format, preview_html, None, None))
+            })
+            .await
+            .map_err(|_| AppError::WorkerFailed)??;
         let fallback_title = current
             .host_str()
             .filter(|host| !host.is_empty())
@@ -952,10 +1208,12 @@ async fn load_url_inner(input: String) -> AppResult<LoadedDocument> {
         };
         return Ok(LoadedDocument {
             title,
-            url: Some(current.to_string()),
-            format: format.into(),
+            url: Some(remote_url),
+            format,
             text,
             preview_html,
+            preview_pdf_base64,
+            preview_notice,
         });
     }
     Err(AppError::TooManyRedirects)
@@ -1645,6 +1903,15 @@ fn analyze_rule(
                     ai_rejection_reason: None,
                     ai_error: None,
                     ai_error_kind: None,
+                    internal_reference_context: if rule.definition.id == "AE-REF-02" {
+                        internal_reference_context(
+                            text,
+                            start,
+                            &text[matched.start()..matched.end()],
+                        )
+                    } else {
+                        None
+                    },
                 };
                 let overlap_indexes = new_findings
                     .iter()
@@ -1715,10 +1982,351 @@ impl OffsetMap {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InternalReferenceContext {
+    pub(crate) citing_block: Option<ReferenceBlockSpan>,
+    pub(crate) referenced_blocks: Vec<ReferenceBlockSpan>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReferenceBlockSpan {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+#[derive(Clone)]
+struct ProvisionMarker {
+    start: usize,
+    level: u8,
+    article: Option<String>,
+    part: Option<String>,
+    point: Option<String>,
+}
+
+fn internal_reference_regex() -> &'static Regex {
+    static REFERENCE: OnceLock<Regex> = OnceLock::new();
+    REFERENCE.get_or_init(|| {
+        Regex::new(r"(?i)(?:(?:пункт(?:е|а|у|ом|ы|ов|ам|ах)\s+(?P<point>\d+(?:\.\d+)*))\s+)?(?:(?:част(?:и|ью|ь|ях|ей)\s+(?P<part>\d+(?:\.\d+)*))\s+)?стать(?:е|и|ю|ёй|ей)\s+(?P<article>\d+(?:\.\d+)*)\s+настоящ(?:его|ей|ую|ему|им)\s+(?:Федеральн(?:ого|ой)\s+закона|ФЗ|закона|кодекс(?:а|е|у|ом)|документ(?:а|е|у|ом))")
+            .expect("valid internal-reference regex")
+    })
+}
+
+fn provision_line_patterns() -> &'static [Regex] {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        [
+            r"(?i)^статья\s+(\d+(?:\.\d+)*)\b",
+            r"^(\d+(?:\.\d+)*)\.(?:\s|$)",
+            r"^(\d+(?:\.\d+)*)\)(?:\s|$)",
+            r"(?i)^([а-яё])\)(?:\s|$)",
+        ]
+        .into_iter()
+        .map(|pattern| Regex::new(pattern).expect("valid provision-line regex"))
+        .collect()
+    })
+}
+
+pub(crate) fn internal_reference_context(
+    text: &str,
+    start_utf16: usize,
+    excerpt: &str,
+) -> Option<InternalReferenceContext> {
+    let captures = internal_reference_regex().captures(excerpt)?;
+    let article = captures.name("article")?.as_str();
+    let part = captures.name("part").map(|value| value.as_str());
+    let point = captures.name("point").map(|value| value.as_str());
+    let source_start = byte_at_utf16_offset(text, start_utf16)?;
+    let markers = provision_markers(text);
+    let offset_map = OffsetMap::new(text);
+    let citing_block = markers
+        .iter()
+        .enumerate()
+        .filter(|(_, marker)| marker.start <= source_start && marker.level <= 2)
+        .last()
+        .map(|(index, _)| provision_block_span(text, &markers, index, &offset_map));
+    let referenced_blocks = markers
+        .iter()
+        .enumerate()
+        .filter(|(_, marker)| {
+            if marker.article.as_deref() != Some(article) {
+                return false;
+            }
+            match (part, point, marker.level) {
+                (Some(wanted_part), Some(wanted_point), 2) => {
+                    marker.part.as_deref() == Some(wanted_part)
+                        && marker.point.as_deref() == Some(wanted_point)
+                }
+                (None, Some(wanted_point), 2) => marker.point.as_deref() == Some(wanted_point),
+                (Some(wanted_part), None, 1) => marker.part.as_deref() == Some(wanted_part),
+                (None, None, 0) => true,
+                _ => false,
+            }
+        })
+        .map(|(index, _)| provision_block_span(text, &markers, index, &offset_map))
+        .collect();
+
+    Some(InternalReferenceContext {
+        citing_block,
+        referenced_blocks,
+    })
+}
+
+pub(crate) fn internal_reference_blocks(
+    text: &str,
+    context: &InternalReferenceContext,
+) -> (Option<String>, Vec<String>) {
+    let block_text = |span: &ReferenceBlockSpan| {
+        let start = byte_at_utf16_offset(text, span.start)?;
+        let end = byte_at_utf16_offset(text, span.end)?;
+        text.get(start..end).map(|block| block.trim().to_string())
+    };
+    (
+        context.citing_block.as_ref().and_then(block_text),
+        context
+            .referenced_blocks
+            .iter()
+            .filter_map(block_text)
+            .collect(),
+    )
+}
+
+fn byte_at_utf16_offset(text: &str, offset: usize) -> Option<usize> {
+    let mut utf16 = 0;
+    for (byte, character) in text.char_indices() {
+        if utf16 == offset {
+            return Some(byte);
+        }
+        utf16 += character.len_utf16();
+        if utf16 > offset {
+            return None;
+        }
+    }
+    (utf16 == offset).then_some(text.len())
+}
+
+fn provision_markers(text: &str) -> Vec<ProvisionMarker> {
+    let patterns = provision_line_patterns();
+    let mut markers = Vec::new();
+    let mut article = None;
+    let mut part = None;
+    let mut point = None;
+    let mut start = 0;
+
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let (level, number) = if let Some(captures) = patterns[0].captures(trimmed) {
+            (0, captures[1].to_string())
+        } else if let Some(captures) = patterns[1].captures(trimmed) {
+            (1, captures[1].to_string())
+        } else if let Some(captures) = patterns[2].captures(trimmed) {
+            (2, captures[1].to_string())
+        } else if let Some(captures) = patterns[3].captures(trimmed) {
+            (3, captures[1].to_string())
+        } else {
+            start += line.len();
+            continue;
+        };
+
+        match level {
+            0 => {
+                article = Some(number.clone());
+                part = None;
+                point = None;
+            }
+            1 => {
+                part = Some(number.clone());
+                point = None;
+            }
+            2 => point = Some(number.clone()),
+            _ => {}
+        }
+        markers.push(ProvisionMarker {
+            start,
+            level,
+            article: article.clone(),
+            part: part.clone(),
+            point: point.clone(),
+        });
+        start += line.len();
+    }
+    markers
+}
+
+fn provision_block_span(
+    text: &str,
+    markers: &[ProvisionMarker],
+    index: usize,
+    offsets: &OffsetMap,
+) -> ReferenceBlockSpan {
+    let marker = &markers[index];
+    let end = markers[index + 1..]
+        .iter()
+        .find(|next| next.level <= marker.level)
+        .map_or(text.len(), |next| next.start);
+    ReferenceBlockSpan {
+        start: offsets.at(text, marker.start),
+        end: offsets.at(text, end),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{analyze, compiled_rules, extract_html_text, CompiledRule, RuleDefinition};
+    use super::{
+        analyze, byte_at_utf16_offset, compiled_rules, extract_html_text, extract_ooxml,
+        extract_rtf, internal_reference_blocks, internal_reference_context, load_file_inner,
+        normalize_text, CompiledRule, RuleDefinition, XmlKind,
+    };
+    use base64::Engine as _;
     use regex::Regex;
+    use std::{fs, io::Write, path::PathBuf, time::SystemTime};
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("norman-preview-test-{nonce}"));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_ooxml(path: &PathBuf, member: &str, xml: &str) {
+        let file = fs::File::create(path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(member, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(xml.as_bytes()).unwrap();
+        archive.finish().unwrap();
+    }
+
+    fn synthetic_pdf_with_image() -> Vec<u8> {
+        let page_content = b"q 36 0 0 36 500 700 cm /Im1 Do Q\nBT /F1 12 Tf 72 720 Td (PDF heading) Tj ET\n";
+        let mut content_stream = format!("<< /Length {} >>\nstream\n", page_content.len()).into_bytes();
+        content_stream.extend_from_slice(page_content);
+        content_stream.extend_from_slice(b"endstream");
+        let image_stream = [
+            b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 3 >>\nstream\n".as_slice(),
+            &[0xff, 0x00, 0x00],
+            b"\nendstream",
+        ]
+        .concat();
+        let objects = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> /XObject << /Im1 6 0 R >> >> /Contents 4 0 R >>".to_vec(),
+            content_stream,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+            image_stream,
+        ];
+        let mut bytes = b"%PDF-1.4\n".to_vec();
+        let mut offsets = vec![0usize];
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            write!(&mut bytes, "{} 0 obj\n", index + 1).unwrap();
+            bytes.extend_from_slice(object);
+            bytes.extend_from_slice(b"\nendobj\n");
+        }
+        let xref_offset = bytes.len();
+        write!(&mut bytes, "xref\n0 {}\n", offsets.len()).unwrap();
+        bytes.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            write!(&mut bytes, "{offset:010} 00000 n \n").unwrap();
+        }
+        write!(
+            &mut bytes,
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            offsets.len()
+        )
+        .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn supported_document_extractors_keep_readable_text_and_offsets() {
+        let word_xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Heading</w:t></w:r></w:p><w:p><w:r><w:t>Body text</w:t></w:r></w:p></w:body></w:document>"#;
+        let odt_xml = r#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:text><text:p>Heading</text:p><text:p>Body text</text:p></office:text></office:body></office:document-content>"#;
+        assert_eq!(
+            normalize_text(&extract_ooxml(word_xml.as_bytes(), "unused", XmlKind::Word).unwrap()),
+            "Heading\nBody text"
+        );
+        assert_eq!(
+            normalize_text(&extract_ooxml(odt_xml.as_bytes(), "unused", XmlKind::OpenDocument).unwrap()),
+            "Heading\nBody text"
+        );
+        assert_eq!(
+            normalize_text(extract_rtf(br#"{\rtf1\ansi Heading\par Body text}"#).unwrap().as_str()),
+            "Heading\nBody text"
+        );
+        let plain = normalize_text("Заголовок\r\nBody text");
+        let body_offset = plain.encode_utf16().take_while(|_| true).count() - "Body text".encode_utf16().count();
+        assert_eq!(&plain.encode_utf16().skip(body_offset).collect::<Vec<_>>(), &"Body text".encode_utf16().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn pdf_import_returns_original_bytes_for_page_preview_and_preserves_text() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("sample.pdf");
+        let bytes = synthetic_pdf_with_image();
+        fs::write(&path, &bytes).unwrap();
+
+        let loaded = load_file_inner(&path).unwrap();
+        assert_eq!(loaded.format, "pdf");
+        assert!(loaded.text.contains("PDF heading"));
+        let encoded = loaded.preview_pdf_base64.expect("PDF preview bytes");
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(encoded).unwrap(), bytes);
+        assert!(loaded.preview_notice.is_none());
+    }
+
+    #[test]
+    fn docx_odt_rtf_and_text_imports_keep_text_fallbacks() {
+        let directory = TestDirectory::new();
+        let docx_path = directory.0.join("sample.docx");
+        write_ooxml(
+            &docx_path,
+            "word/document.xml",
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Heading</w:t></w:r></w:p><w:p><w:r><w:t>Body</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+        let odt_path = directory.0.join("sample.odt");
+        write_ooxml(
+            &odt_path,
+            "content.xml",
+            r#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:text><text:p>Heading</text:p><text:p>Body</text:p></office:text></office:body></office:document-content>"#,
+        );
+        let rtf_path = directory.0.join("sample.rtf");
+        fs::write(&rtf_path, br#"{\rtf1\ansi Heading\par Body}"#).unwrap();
+        let text_path = directory.0.join("sample.txt");
+        fs::write(&text_path, b"Heading\r\nBody").unwrap();
+
+        for (path, format) in [
+            (&docx_path, "docx"),
+            (&odt_path, "odt"),
+            (&rtf_path, "rtf"),
+            (&text_path, "txt"),
+        ] {
+            let loaded = load_file_inner(path).unwrap();
+            assert_eq!(loaded.format, format);
+            assert_eq!(loaded.text, "Heading\nBody");
+            if format == "txt" {
+                assert!(loaded.preview_pdf_base64.is_none());
+                assert!(loaded.preview_notice.is_none());
+            } else {
+                assert!(loaded.preview_pdf_base64.is_some() || loaded.preview_notice.is_some());
+            }
+        }
+    }
 
     #[test]
     fn risk_rule_catalog_compiles_and_matches_cyrillic_domains() {
@@ -1763,6 +2371,39 @@ mod tests {
                 "finding offsets must point to exact preview text"
             );
         }
+    }
+
+    #[test]
+    fn internal_reference_signal_resolves_both_complete_point_blocks() {
+        let text = "Статья 3. Перечень.\n1. Первая часть.\n1) Первый пункт.\n2) Второй пункт.\n3) Органами, организациями и их должностными лицами — в соответствии с настоящим Федеральным законом, в установленном порядке.\nПродолжение пункта 3.\n(в ред. Федерального закона от 30.09.2024 N 334-ФЗ)\n4) Четвертый пункт.\nСтатья 5. Запрет.\n1. Общая часть.\n1.1. Независимая экспертиза.\n3) Гражданам, осуществляющим деятельность в органах, указанных в пункте 3 части 1 статьи 3 настоящего Федерального закона, запрещено проводить экспертизу.\nПродолжение пункта 3 статьи 5.\n4) Следующий пункт.\n";
+        let findings = analyze(text, compiled_rules().unwrap(), |_| {}).unwrap();
+        let finding = findings
+            .iter()
+            .find(|finding| finding.rule_id == "AE-REF-02")
+            .expect("internal self-reference should produce a review signal");
+        assert_eq!(
+            finding.excerpt,
+            "пункте 3 части 1 статьи 3 настоящего Федерального закона"
+        );
+        assert!(finding.internal_reference_context.is_some());
+        let context = internal_reference_context(text, finding.start, &finding.excerpt)
+            .expect("recognized self-reference should resolve its provision context");
+        let (citing_block, referenced_blocks) = internal_reference_blocks(text, &context);
+        assert_eq!(
+            citing_block.as_deref(),
+            Some("3) Гражданам, осуществляющим деятельность в органах, указанных в пункте 3 части 1 статьи 3 настоящего Федерального закона, запрещено проводить экспертизу.\nПродолжение пункта 3 статьи 5.")
+        );
+        assert_eq!(referenced_blocks.len(), 1);
+        assert_eq!(
+            referenced_blocks[0],
+            "3) Органами, организациями и их должностными лицами — в соответствии с настоящим Федеральным законом, в установленном порядке.\nПродолжение пункта 3.\n(в ред. Федерального закона от 30.09.2024 N 334-ФЗ)"
+        );
+        let byte_start = byte_at_utf16_offset(text, finding.start).unwrap();
+        assert_eq!(
+            &text[byte_start..byte_start + finding.excerpt.len()],
+            finding.excerpt,
+            "reference excerpt must retain exact source location"
+        );
     }
 
     #[test]

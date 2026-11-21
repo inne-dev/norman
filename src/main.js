@@ -5,6 +5,8 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import * as pdfjs from 'pdfjs-dist';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import packageInfo from '../package.json';
 import { aiConfidenceLevel, findingConfidenceLevel, isAiFinding } from './finding-confidence.js';
 import { enhanceCustomSelects, makeProviderIcon } from './custom-select.js';
@@ -12,6 +14,8 @@ import { allModelsForRecommendation, recommendationForMemory } from './ollama-re
 import { estimateRemainingSeconds, formatRemainingTime, renderOllamaProgressFeedback } from './ollama-progress.js';
 import { memoryGiB, resolveTheme, savedThemePreference } from './ui-state.js';
 import './style.css';
+
+pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const isTauri = Boolean(window.__TAURI_INTERNALS__);
 const isBrowserOllamaDev = !isTauri && import.meta.env.DEV;
@@ -25,6 +29,7 @@ const WELCOME_STORAGE_KEY = 'norman-welcome-shown';
 const DEFAULT_CODEX_SETTINGS = Object.freeze({
   enabled: false,
   provider: 'codex',
+  normanServerUrl: 'https://norman.inne.space',
   model: 'gpt-6-luna',
   reasoningEffort: 'high',
   claudeModel: 'sonnet',
@@ -65,6 +70,20 @@ let sourceMarks = [];
 let followedFindingId = null;
 let sourceSyncFrame = 0;
 let pageFrameSoftTimeout = 0;
+let pdfPreviewDocumentRef = null;
+let pdfLoadingTask = null;
+let pdfDocumentProxy = null;
+let pdfRenderQueue = Promise.resolve(false);
+let pdfPageCount = 0;
+let pdfPages = new Map();
+let pdfPageTextIndexes = new Map();
+let pdfFindingLocations = new Map();
+let pdfFindingSearchComplete = new Set();
+let pdfFindingSearchKeys = new Set();
+let pdfFindingSearchPromise = null;
+let pdfFindingSearchQueued = false;
+let pdfCurrentPageNumber = 0;
+let pdfPreviewFailed = false;
 let rejectedFindingsSection = null;
 let rejectedFindingsList = null;
 let rejectedFindingsCount = null;
@@ -79,6 +98,8 @@ let ollamaStarting = false;
 let cloudRuStatus = { checked: false, available: false, models: [], message: '' };
 let cloudRuStatusRequestId = 0;
 let cloudRuApiKey = '';
+let normanStatus = { checked: false, authenticated: false, user: null, quota: null, checking: false, error: false, message: 'Войдите в аккаунт Norman.' };
+let normanStatusRequest = null;
 let yandexStatus = { checked: false, available: false, models: [], message: '' };
 let yandexStatusRequestId = 0;
 let yandexApiKey = '';
@@ -130,6 +151,11 @@ const ui = {
   welcomeOpenSettings: document.querySelector('#welcomeOpenSettings'),
   settingsDialog: document.querySelector('#settingsDialog'),
   settingsTitle: document.querySelector('#settingsTitle'),
+  settingsTabs: document.querySelector('#settingsTabs'),
+  settingsTabButtons: [...document.querySelectorAll('[data-settings-tab]')],
+  settingsGeneral: document.querySelector('#settingsGeneral'),
+  settingsAi: document.querySelector('#settingsAi'),
+  settingsAccount: document.querySelector('#settingsAccount'),
   aiSettingsGroup: document.querySelector('#aiSettingsGroup'),
   closeSettings: document.querySelector('#closeSettings'),
   openOllamaSetup: document.querySelector('#openOllamaSetup'),
@@ -147,6 +173,7 @@ const ui = {
   ollamaSetupEta: document.querySelector('#ollamaSetupEta'),
   headerAiStatus: document.querySelector('#headerAiStatus'),
   headerAiProviderIcon: document.querySelector('#headerAiProviderIcon'),
+  headerAiQuota: document.querySelector('#headerAiQuota'),
   headerAiReasoning: document.querySelector('#headerAiReasoning'),
   aiReviewDialog: document.querySelector('#aiReviewDialog'),
   aiReviewTitle: document.querySelector('#aiReviewTitle'),
@@ -164,6 +191,7 @@ const ui = {
   aiReviewConfidenceMarker: document.querySelector('#aiReviewConfidenceMarker'),
   aiReviewDecision: document.querySelector('#aiReviewDecision'),
   codexEnabled: document.querySelector('#codexEnabled'),
+  codexDescription: document.querySelector('#codexDescription'),
   filterAdsInPreview: document.querySelector('#filterAdsInPreview'),
   codexOptions: document.querySelector('#codexOptions'),
   codexProvider: document.querySelector('#codexProvider'),
@@ -202,6 +230,23 @@ const ui = {
   yandexModel: document.querySelector('#yandexModel'),
   yandexStatus: document.querySelector('#yandexStatus'),
   checkYandexStatus: document.querySelector('#checkYandexStatus'),
+  normanOptions: document.querySelector('#normanOptions'),
+  normanStatus: document.querySelector('#normanStatus'),
+  normanServerUrl: document.querySelector('#normanServerUrl'),
+  normanEmail: document.querySelector('#normanEmail'),
+  normanPassword: document.querySelector('#normanPassword'),
+  normanCode: document.querySelector('#normanCode'),
+  normanLogin: document.querySelector('#normanLogin'),
+  normanRegister: document.querySelector('#normanRegister'),
+  normanVerify: document.querySelector('#normanVerify'),
+  normanLogout: document.querySelector('#normanLogout'),
+  normanSignedOut: document.querySelector('#normanSignedOut'),
+  normanSignedIn: document.querySelector('#normanSignedIn'),
+  normanAccountEmail: document.querySelector('#normanAccountEmail'),
+  normanAccountQuota: document.querySelector('#normanAccountQuota'),
+  normanAccountStatus: document.querySelector('#normanAccountStatus'),
+  checkNormanStatus: document.querySelector('#checkNormanStatus'),
+  manageNormanAccount: document.querySelector('#manageNormanAccount'),
   parallelProcesses: document.querySelector('#parallelProcesses'),
   codexStatus: document.querySelector('#codexStatus'),
   checkCodexStatus: document.querySelector('#checkCodexStatus'),
@@ -215,6 +260,13 @@ const ui = {
   documentFormat: document.querySelector('#documentFormat'),
   documentTitle: document.querySelector('#documentTitle'),
   documentText: document.querySelector('#documentText'),
+  previewNotice: document.querySelector('#previewNotice'),
+  pdfReader: document.querySelector('#pdfReader'),
+  pdfPageStatus: document.querySelector('#pdfPageStatus'),
+  pdfPageHost: document.querySelector('#pdfPageHost'),
+  pdfPageLoading: document.querySelector('#pdfPageLoading'),
+  pdfPageError: document.querySelector('#pdfPageError'),
+  pdfPages: document.querySelector('#pdfPages'),
   resultCount: document.querySelector('#resultCount'),
   analysisStatus: document.querySelector('#analysisStatus'),
   analysisPauseButton: document.querySelector('#analysisPauseButton'),
@@ -289,15 +341,21 @@ if (isTauri && currentPlatform === 'windows') {
   });
 }
 
+let providerPreferenceSaved = false;
+
 function loadCodexSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(CODEX_STORAGE_KEY) || '{}');
+    providerPreferenceSaved = ['codex', 'claude', 'ollama', 'cloudru', 'yandex', 'norman'].includes(saved.provider);
     return {
       ...DEFAULT_CODEX_SETTINGS,
       ...saved,
       enabled: saved.enabled === true,
       filterAdsInPreview: saved.filterAdsInPreview !== false,
-      provider: ['claude', 'ollama', 'cloudru', 'yandex'].includes(saved.provider) ? saved.provider : 'codex',
+      provider: providerPreferenceSaved ? saved.provider : (saved.enabled === true ? 'norman' : 'codex'),
+      normanServerUrl: typeof saved.normanServerUrl === 'string' && saved.normanServerUrl.trim()
+        ? saved.normanServerUrl.trim()
+        : DEFAULT_CODEX_SETTINGS.normanServerUrl,
       model: ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra'].includes(saved.model)
         ? saved.model
         : DEFAULT_CODEX_SETTINGS.model,
@@ -322,6 +380,7 @@ function loadCodexSettings() {
         : DEFAULT_CODEX_SETTINGS.parallelProcesses,
     };
   } catch {
+    providerPreferenceSaved = false;
     return { ...DEFAULT_CODEX_SETTINGS };
   }
 }
@@ -330,7 +389,9 @@ const codexSettings = loadCodexSettings();
 
 function saveCodexSettings() {
   try {
-    localStorage.setItem(CODEX_STORAGE_KEY, JSON.stringify(codexSettings));
+    const saved = { ...codexSettings };
+    if (!providerPreferenceSaved && !codexSettings.enabled) delete saved.provider;
+    localStorage.setItem(CODEX_STORAGE_KEY, JSON.stringify(saved));
   } catch {
     // Settings still apply for this session when storage is unavailable.
   }
@@ -356,6 +417,10 @@ function syncCodexSettingsUI() {
   ui.yandexOptions.hidden = codexSettings.provider !== 'yandex';
   ui.yandexFolderId.value = codexSettings.yandexFolderId;
   renderYandexStatus();
+  ui.normanOptions.hidden = codexSettings.provider !== 'norman';
+  ui.normanServerUrl.value = codexSettings.normanServerUrl;
+  renderNormanStatus();
+  renderAiProviderConsent();
   ui.parallelProcesses.value = String(codexSettings.parallelProcesses);
   renderCodexStatus();
   renderAiAnalysisNote();
@@ -369,6 +434,12 @@ function renderHeaderAiStatus() {
 
   const icon = makeProviderIcon(codexSettings.provider, 'custom-select-icon');
   ui.headerAiProviderIcon.replaceChildren(...(icon ? [icon] : []));
+  const quota = codexSettings.provider === 'norman' && normanStatus.authenticated ? normanStatus.quota : null;
+  const percent = quota ? normanQuotaPercent(quota) : null;
+  const resetsAt = quota ? normanQuotaResetLabel(quota) : '';
+  ui.headerAiQuota.hidden = percent === null;
+  ui.headerAiQuota.textContent = percent === null ? '' : `${percent}%`;
+  ui.headerAiQuota.title = resetsAt ? `Квота обновится: ${resetsAt}` : '';
 
   const reasoningControl = codexSettings.provider === 'codex'
     ? ui.codexReasoning
@@ -380,9 +451,20 @@ function renderHeaderAiStatus() {
   const description = [
     aiProviderLabel(codexSettings.provider),
     ...(reasoning ? [`Уровень рассуждения: ${reasoning}`] : []),
+    ...(quota ? [`Осталось ${quota.remaining} из ${quota.limit} запросов${resetsAt ? ` · обновление ${resetsAt}` : ''}`] : []),
+    ...(codexSettings.provider === 'norman' && !normanStatus.authenticated ? ['Войдите в аккаунт Norman'] : []),
   ];
   ui.headerAiStatus.title = `Открыть настройки ИИ · ${description.join(' · ')}`;
   ui.headerAiStatus.setAttribute('aria-label', `Открыть настройки ИИ. ${description.join('. ')}`);
+}
+
+function renderAiProviderConsent() {
+  if (codexSettings.provider === 'norman') {
+    const server = codexSettings.normanServerUrl.trim() || DEFAULT_CODEX_SETTINGS.normanServerUrl;
+    ui.codexDescription.textContent = `При включении текст документа и найденные сигналы передаются только выбранному серверу Norman: ${server}.`;
+  } else {
+    ui.codexDescription.textContent = `При включении текст документа и найденные сигналы передаются только выбранному провайдеру: ${aiProviderLabel(codexSettings.provider)}.`;
+  }
 }
 
 let sourceTargets = new Map();
@@ -447,23 +529,28 @@ function closeWelcome() {
 
 function showSettingsDialog({ aiOnly = false, focusTarget = null } = {}) {
   syncCodexSettingsUI();
-  ui.settingsDialog.classList.toggle('ai-only', aiOnly);
-  ui.settingsTitle.textContent = aiOnly ? 'Настройки ИИ' : 'Настройки';
+  setSettingsTab(aiOnly ? 'ai' : 'general');
+  ui.settingsTitle.textContent = 'Настройки';
   ui.settingsDialog.showModal();
   if (codexSettings.provider === 'ollama') void prepareOllamaSettings();
   else if (codexSettings.enabled) void refreshSelectedAiProviderStatus();
   if (focusTarget) {
-    requestAnimationFrame(() => {
-      if (aiOnly) {
-        const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-        ui.aiSettingsGroup.scrollIntoView({
-          behavior: reducedMotion ? 'auto' : 'smooth',
-          block: 'start',
-        });
-      }
-      focusTarget.focus({ preventScroll: aiOnly });
-    });
+    requestAnimationFrame(() => focusTarget.focus({ preventScroll: true }));
   }
+}
+
+function setSettingsTab(name, { focus = false } = {}) {
+  const selected = ui.settingsTabButtons.find((button) => button.dataset.settingsTab === name)
+    || ui.settingsTabButtons[0];
+  for (const button of ui.settingsTabButtons) {
+    const active = button === selected;
+    button.setAttribute('aria-selected', String(active));
+    button.tabIndex = active ? 0 : -1;
+    const panel = document.getElementById(button.getAttribute('aria-controls'));
+    if (panel) panel.hidden = !active;
+  }
+  if (focus) selected.focus();
+  if (selected.dataset.settingsTab === 'account') void refreshNormanStatus();
 }
 
 function openSettingsFromWelcome() {
@@ -730,10 +817,12 @@ function keepExpandedFindingVisible(key) {
 function selectFinding(key, { scrollPreview = true, focusFinding = false } = {}) {
   if (!key || !state.findings.some((finding, index) => findingKey(finding, index) === key)) return;
   state.selectedId = key;
+  updatePdfHighlightSelection();
   render();
   if (focusFinding) keepExpandedFindingVisible(key);
   else keepFindingVisible(key);
-  if (scrollPreview && state.document?.url) scrollPageFindingIntoView(key);
+  if (scrollPreview && state.document?.previewPdfBase64) void jumpToPdfFinding(key);
+  else if (scrollPreview && state.document?.url) scrollPageFindingIntoView(key);
 }
 
 function syncFindingToSourceScroll() {
@@ -1068,6 +1157,643 @@ function renderSourceText() {
   ui.documentText.replaceChildren(fragment);
 }
 
+function decodePdfBase64(value) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function updatePdfPageIndicator(pageNumber = pdfCurrentPageNumber) {
+  if (pdfPreviewFailed) return;
+  ui.pdfPageStatus.textContent = pdfPageCount
+    ? 'Страница ' + (pageNumber || 1) + ' из ' + pdfPageCount
+    : 'Загрузка…';
+}
+
+function showPdfPreviewError(error) {
+  pdfPreviewFailed = true;
+  ui.pdfPageLoading.hidden = true;
+  ui.pdfPageError.hidden = false;
+  ui.pdfPageError.textContent = 'Предпросмотр недоступен. Показан извлечённый текст ниже.';
+  const detail = error?.message || error?.name || (typeof error === 'string' ? error : '');
+  ui.pdfPageStatus.textContent = detail ? 'Ошибка PDF: ' + detail : 'Предпросмотр недоступен';
+  ui.textPanel.classList.remove('is-pdf-preview');
+  ui.readerFrame.classList.remove('is-pdf-preview');
+  ui.pdfReader.classList.add('has-preview-error');
+  ui.documentText.hidden = false;
+  renderSourceText();
+}
+
+function updatePdfHighlightSelection() {
+  for (const entry of pdfPages.values()) {
+    for (const hit of entry.highlightLayer.children) {
+      hit.classList.toggle('is-selected', hit.dataset.findingId === state.selectedId);
+    }
+  }
+}
+
+function normalizePdfText(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .replace(/[\s\u00ad\u200b-\u200d\ufeff]/gu, '')
+    .toLocaleLowerCase('ru-RU');
+}
+
+function buildPdfTextIndex(items) {
+  const text = [];
+  const characters = [];
+  items.forEach((item, itemIndex) => {
+    const value = typeof item.str === 'string' ? item.str : '';
+    for (let offset = 0; offset < value.length;) {
+      const codePoint = value.codePointAt(offset);
+      const rawCharacter = String.fromCodePoint(codePoint);
+      const normalized = normalizePdfText(rawCharacter);
+      for (const character of normalized) {
+        text.push(character);
+        characters.push({ itemIndex, start: offset, end: offset + rawCharacter.length });
+      }
+      offset += rawCharacter.length;
+    }
+  });
+  return { text: text.join(''), characters };
+}
+
+function occurrenceCountBefore(text, excerpt, offset) {
+  const prefix = normalizePdfText(text.slice(0, offset));
+  let count = 0;
+  let position = 0;
+  while ((position = prefix.indexOf(excerpt, position)) !== -1) {
+    count += 1;
+    position += excerpt.length;
+  }
+  return count;
+}
+
+function syncPdfFindingHighlights() {
+  const documentRef = state.document;
+  const pdfDocument = pdfDocumentProxy;
+  if (!documentRef || documentRef !== pdfPreviewDocumentRef || !pdfDocument) return null;
+
+  const pending = state.findings
+    .map((finding, index) => ({ finding, key: findingKey(finding, index) }))
+    .filter(({ finding, key }) => isValidFinding(finding)
+      && !pdfFindingSearchComplete.has(key)
+      && !pdfFindingSearchKeys.has(key)
+      && !pdfFindingLocations.has(key));
+  if (!pending.length) return pdfFindingSearchPromise || Promise.resolve();
+  if (pdfFindingSearchPromise) {
+    pdfFindingSearchQueued = true;
+    return pdfFindingSearchPromise;
+  }
+
+  const search = async () => {
+    const groups = new Map();
+    const sourceText = documentRef.text || '';
+    const sourceLength = Math.max(1, normalizePdfText(sourceText).length);
+
+    for (const target of pending) {
+      const excerpt = normalizePdfText(target.finding.excerpt);
+      if (!excerpt) {
+        pdfFindingSearchComplete.add(target.key);
+        continue;
+      }
+      target.excerpt = excerpt;
+      target.expectedOccurrence = occurrenceCountBefore(sourceText, excerpt, target.finding.start);
+      target.sourceRatio = normalizePdfText(sourceText.slice(0, target.finding.start)).length / sourceLength;
+      if (!groups.has(excerpt)) groups.set(excerpt, { excerpt, targets: [], matches: [] });
+      groups.get(excerpt).targets.push(target);
+    }
+    if (!groups.size) return;
+
+    let fullOffset = 0;
+    let totalLength = 0;
+    for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
+      if (documentRef !== state.document || pdfDocument !== pdfDocumentProxy) return;
+      const page = await pdfDocument.getPage(pageNumber);
+      const pageIndex = pdfPageTextIndexes.get(pageNumber)
+        || buildPdfTextIndex((await page.getTextContent()).items);
+      for (const group of groups.values()) {
+        let position = 0;
+        while ((position = pageIndex.text.indexOf(group.excerpt, position)) !== -1) {
+          const start = pageIndex.characters[position];
+          const end = pageIndex.characters[position + group.excerpt.length - 1];
+          if (start && end) {
+            group.matches.push({ pageNumber, start, end, documentOffset: fullOffset + position });
+          }
+          position += group.excerpt.length;
+        }
+      }
+      fullOffset += pageIndex.text.length;
+      totalLength += pageIndex.text.length;
+    }
+
+    if (documentRef !== state.document || pdfDocument !== pdfDocumentProxy) return;
+    for (const group of groups.values()) {
+      for (const target of group.targets) {
+        let match = group.matches[target.expectedOccurrence];
+        if (!match && group.matches.length && totalLength > 0) {
+          match = group.matches.reduce((closest, candidate) => {
+            const candidateRatio = candidate.documentOffset / totalLength;
+            const closestRatio = closest.documentOffset / totalLength;
+            return Math.abs(candidateRatio - target.sourceRatio) < Math.abs(closestRatio - target.sourceRatio)
+              ? candidate
+              : closest;
+          });
+        }
+        if (match) {
+          const location = { pageNumber: match.pageNumber, start: match.start, end: match.end };
+          pdfFindingLocations.set(target.key, location);
+          const entry = pdfPages.get(location.pageNumber);
+          if (entry?.rendered) renderPdfHighlight(target.key, location, entry);
+        }
+        pdfFindingSearchComplete.add(target.key);
+      }
+    }
+  };
+
+  for (const { key } of pending) pdfFindingSearchKeys.add(key);
+  let searchPromise;
+  searchPromise = search().finally(() => {
+    if (pdfFindingSearchPromise !== searchPromise) return;
+    for (const { key } of pending) pdfFindingSearchKeys.delete(key);
+    pdfFindingSearchPromise = null;
+    const hasUnsearchedFindings = state.document === documentRef
+      && state.findings.some((finding, index) => {
+        const key = findingKey(finding, index);
+        return isValidFinding(finding)
+          && !pdfFindingSearchComplete.has(key)
+          && !pdfFindingSearchKeys.has(key)
+          && !pdfFindingLocations.has(key);
+      });
+    if (pdfFindingSearchQueued || hasUnsearchedFindings) {
+      pdfFindingSearchQueued = false;
+      void syncPdfFindingHighlights();
+    }
+  });
+  pdfFindingSearchPromise = searchPromise;
+  void searchPromise.catch((error) => console.error('PDF finding highlights failed', error));
+  return searchPromise;
+}
+
+async function locatePdfFinding(key) {
+  if (pdfFindingLocations.has(key)) return pdfFindingLocations.get(key);
+  const finding = state.findings.find((candidate, index) => findingKey(candidate, index) === key);
+  if (!finding || !isValidFinding(finding)) return null;
+  while (!pdfFindingSearchComplete.has(key) && state.document === pdfPreviewDocumentRef) {
+    const searchPromise = syncPdfFindingHighlights();
+    if (!searchPromise) break;
+    try {
+      await searchPromise;
+    } catch {
+      return null;
+    }
+  }
+  return pdfFindingLocations.get(key) || null;
+}
+
+function textPointAtOffset(element, offset) {
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  let remaining = offset;
+  let node;
+  while ((node = walker.nextNode())) {
+    if (remaining <= node.textContent.length) return { node, offset: remaining };
+    remaining -= node.textContent.length;
+  }
+  return null;
+}
+
+function mergePdfHighlightRects(rects) {
+  const lines = [];
+  const orderedRects = Array.from(rects)
+    .filter((rect) => rect.width >= 1 && rect.height >= 1)
+    .sort((left, right) => left.top - right.top || left.left - right.left);
+
+  for (const rect of orderedRects) {
+    let matchingLine = null;
+    let bestOverlap = 0.55;
+    for (const line of lines) {
+      const overlap = Math.min(rect.bottom, line.bottom) - Math.max(rect.top, line.top);
+      const overlapRatio = overlap / Math.min(rect.height, line.bottom - line.top);
+      if (overlapRatio > bestOverlap) {
+        matchingLine = line;
+        bestOverlap = overlapRatio;
+      }
+    }
+
+    const line = matchingLine || {
+      left: rect.left,
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.bottom,
+    };
+    if (!matchingLine) lines.push(line);
+    line.left = Math.min(line.left, rect.left);
+    line.top = Math.min(line.top, rect.top);
+    line.right = Math.max(line.right, rect.right);
+    line.bottom = Math.max(line.bottom, rect.bottom);
+  }
+
+  return lines.sort((left, right) => left.top - right.top);
+}
+
+function renderPdfHighlight(key, location, entry) {
+  const existingHit = Array.from(entry.highlightLayer.children)
+    .find((hit) => hit.dataset.findingId === key);
+  if (existingHit) return existingHit;
+  const textDivs = entry.textLayerInstance?.textDivs || [];
+  const startDiv = textDivs[location.start.itemIndex];
+  const endDiv = textDivs[location.end.itemIndex];
+  if (!startDiv || !endDiv) return null;
+  const start = textPointAtOffset(startDiv, location.start.start);
+  const end = textPointAtOffset(endDiv, location.end.end);
+  if (!start || !end) return null;
+
+  const range = document.createRange();
+  range.setStart(start.node, start.offset);
+  range.setEnd(end.node, end.offset);
+  const sheetRect = entry.sheet.getBoundingClientRect();
+  const segments = mergePdfHighlightRects(range.getClientRects());
+  const finding = state.findings.find((candidate, index) => findingKey(candidate, index) === key);
+  const confidence = finding ? findingConfidenceLevel(finding) : 'unknown';
+  let firstHit = null;
+
+  for (const segment of segments) {
+    const hit = document.createElement('div');
+    hit.className = 'pdf-source-hit';
+    if (key === state.selectedId) hit.classList.add('is-selected');
+    hit.dataset.findingId = key;
+    hit.dataset.confidence = confidence;
+    hit.tabIndex = -1;
+    hit.setAttribute('role', 'note');
+    hit.setAttribute('aria-label', 'Фрагмент найденного сигнала');
+    if (finding?.excerpt) hit.title = finding.excerpt;
+    hit.style.left = (segment.left - sheetRect.left) + 'px';
+    hit.style.top = (segment.top - sheetRect.top) + 'px';
+    hit.style.width = (segment.right - segment.left) + 'px';
+    hit.style.height = (segment.bottom - segment.top) + 'px';
+    entry.highlightLayer.append(hit);
+    if (!firstHit) firstHit = hit;
+  }
+
+  if (firstHit) {
+    sourceTargets.set(key, firstHit);
+  }
+  return firstHit;
+}
+
+function releasePdfPage(entry) {
+  entry.renderToken += 1;
+  entry.isNearViewport = false;
+  if (entry.renderTask) entry.renderTask.cancel();
+  if (entry.textLayerInstance) entry.textLayerInstance.cancel();
+  entry.renderTask = null;
+  entry.textLayerInstance = null;
+  entry.rendered = false;
+  entry.renderPromise = null;
+  entry.canvas.width = 0;
+  entry.canvas.height = 0;
+  entry.textLayer.replaceChildren();
+  for (const hit of entry.highlightLayer.children) {
+    sourceTargets.delete(hit.dataset.findingId);
+  }
+  entry.highlightLayer.replaceChildren();
+  entry.pageError.hidden = true;
+  pdfPageTextIndexes.delete(entry.pageNumber);
+}
+
+function disposePdfPreview() {
+  for (const entry of pdfPages.values()) {
+    pdfPageVisibilityObserver.unobserve(entry.sheet);
+    pdfPageRenderObserver.unobserve(entry.sheet);
+    releasePdfPage(entry);
+  }
+  pdfPages.clear();
+  pdfVisiblePageRatios.clear();
+  pdfPageTextIndexes.clear();
+  pdfFindingLocations.clear();
+  pdfFindingSearchComplete.clear();
+  pdfFindingSearchKeys.clear();
+  pdfFindingSearchPromise = null;
+  pdfFindingSearchQueued = false;
+  if (pdfDocumentProxy) void pdfDocumentProxy.destroy();
+  else if (pdfLoadingTask) void pdfLoadingTask.destroy();
+  pdfDocumentProxy = null;
+  pdfLoadingTask = null;
+  pdfPreviewDocumentRef = null;
+  pdfPageCount = 0;
+  pdfCurrentPageNumber = 0;
+  pdfPreviewFailed = false;
+  ui.pdfPages.replaceChildren();
+  ui.pdfReader.hidden = true;
+  ui.pdfReader.classList.remove('has-preview-error');
+  ui.textPanel.classList.remove('is-pdf-preview');
+  ui.readerFrame.classList.remove('is-pdf-preview');
+  ui.documentText.hidden = false;
+  ui.pdfPageLoading.hidden = false;
+  ui.pdfPageError.hidden = true;
+  ui.pdfPageError.textContent = 'Оригинал недоступен. Показан извлечённый текст ниже.';
+  ui.pdfPageStatus.textContent = '';
+}
+
+function pageScaleForWidth(entry, width) {
+  return width / entry.baseViewport.width;
+}
+
+function updatePdfPageSize(entry, hostWidth) {
+  const viewport = entry.page.getViewport({ scale: pageScaleForWidth(entry, hostWidth) });
+  entry.viewport = viewport;
+  entry.sheet.style.width = Math.floor(viewport.width) + 'px';
+  entry.sheet.style.height = Math.floor(viewport.height) + 'px';
+}
+
+function createPdfPageEntry(pageNumber, page, hostWidth) {
+  const sheet = document.createElement('div');
+  sheet.className = 'pdf-page-sheet';
+  sheet.dataset.pageNumber = String(pageNumber);
+  sheet.setAttribute('aria-label', 'Страница ' + pageNumber);
+
+  const canvas = document.createElement('canvas');
+  canvas.className = 'pdf-page-canvas';
+  canvas.setAttribute('aria-label', 'Страница ' + pageNumber + ' PDF');
+
+  const textLayer = document.createElement('div');
+  textLayer.className = 'textLayer pdf-text-layer';
+  textLayer.setAttribute('aria-label', 'Текст страницы ' + pageNumber);
+
+  const highlightLayer = document.createElement('div');
+  highlightLayer.className = 'pdf-highlight-layer';
+  highlightLayer.setAttribute('aria-label', 'Найденные фрагменты страницы ' + pageNumber);
+
+  const pageError = document.createElement('p');
+  pageError.className = 'pdf-page-render-error';
+  pageError.textContent = 'Не удалось отобразить эту страницу.';
+  pageError.hidden = true;
+
+  sheet.append(canvas, textLayer, highlightLayer, pageError);
+  const entry = {
+    pageNumber,
+    page,
+    baseViewport: page.getViewport({ scale: 1 }),
+    viewport: null,
+    sheet,
+    canvas,
+    textLayer,
+    highlightLayer,
+    pageError,
+    textLayerInstance: null,
+    renderTask: null,
+    renderPromise: null,
+    renderToken: 0,
+    textIndex: null,
+    rendered: false,
+    isNearViewport: false,
+  };
+  updatePdfPageSize(entry, hostWidth);
+  return entry;
+}
+
+function renderPdfPage(pageNumber) {
+  const entry = pdfPages.get(pageNumber);
+  const documentRef = pdfPreviewDocumentRef;
+  const pdfDocument = pdfDocumentProxy;
+  if (!entry || !documentRef || !pdfDocument || entry.rendered) return Promise.resolve(Boolean(entry?.rendered));
+  if (entry.renderPromise) return entry.renderPromise;
+
+  const token = ++entry.renderToken;
+  const previousRender = pdfRenderQueue;
+  const renderPromise = previousRender.catch(() => false).then(async () => {
+    if (token !== entry.renderToken || !entry.isNearViewport
+      || documentRef !== pdfPreviewDocumentRef || pdfDocument !== pdfDocumentProxy) return false;
+
+    try {
+      const hostWidth = Math.max(1, ui.pdfPageHost.clientWidth);
+      updatePdfPageSize(entry, hostWidth);
+      const viewport = entry.viewport;
+      const deviceScale = Math.min(window.devicePixelRatio || 1, 2);
+      const pixelScale = Math.sqrt(6_000_000 / Math.max(1, viewport.width * viewport.height));
+      const outputScale = Math.min(deviceScale, pixelScale);
+      const context = entry.canvas.getContext('2d', { alpha: false });
+      if (!context) throw new Error('Canvas is unavailable');
+      entry.canvas.width = Math.max(1, Math.floor(viewport.width * outputScale));
+      entry.canvas.height = Math.max(1, Math.floor(viewport.height * outputScale));
+      entry.canvas.style.width = Math.floor(viewport.width) + 'px';
+      entry.canvas.style.height = Math.floor(viewport.height) + 'px';
+      const renderTask = entry.page.render({
+        canvasContext: context,
+        viewport,
+        transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0],
+      });
+      entry.renderTask = renderTask;
+      await renderTask.promise;
+      if (token !== entry.renderToken || documentRef !== pdfPreviewDocumentRef) return false;
+      entry.renderTask = null;
+      const textContent = await entry.page.getTextContent();
+      entry.textLayerInstance = new pdfjs.TextLayer({
+        textContentSource: textContent,
+        container: entry.textLayer,
+        viewport,
+      });
+      await entry.textLayerInstance.render();
+      if (token !== entry.renderToken || documentRef !== pdfPreviewDocumentRef) return false;
+
+      entry.textIndex = buildPdfTextIndex(textContent.items);
+      pdfPageTextIndexes.set(pageNumber, entry.textIndex);
+      entry.rendered = true;
+      entry.pageError.hidden = true;
+      if (pageNumber === 1 || ui.pdfPageLoading.hidden === false) ui.pdfPageLoading.hidden = true;
+      ui.documentText.hidden = true;
+      for (const [key, location] of pdfFindingLocations) {
+        if (location.pageNumber === pageNumber) renderPdfHighlight(key, location, entry);
+      }
+      return true;
+    } catch (error) {
+      if (token !== entry.renderToken || documentRef !== pdfPreviewDocumentRef) return false;
+      if (error?.name === 'RenderingCancelledException') return false;
+      entry.renderTask = null;
+      entry.pageError.hidden = false;
+      console.error('PDF page render failed', error);
+      return false;
+    }
+  });
+  entry.renderPromise = renderPromise;
+  pdfRenderQueue = renderPromise;
+  void renderPromise.finally(() => {
+    if (entry.renderPromise === renderPromise) entry.renderPromise = null;
+  });
+  return renderPromise;
+}
+
+async function createPdfPages(documentRef, pdfDocument) {
+  ui.pdfPages.replaceChildren();
+  const hostWidth = Math.max(1, ui.pdfPageHost.clientWidth);
+  for (let pageNumber = 1; pageNumber <= pdfPageCount; pageNumber += 1) {
+    if (documentRef !== state.document || documentRef !== pdfPreviewDocumentRef || pdfDocument !== pdfDocumentProxy) return;
+    const page = await pdfDocument.getPage(pageNumber);
+    if (documentRef !== state.document || documentRef !== pdfPreviewDocumentRef) return;
+    const entry = createPdfPageEntry(pageNumber, page, hostWidth);
+    pdfPages.set(pageNumber, entry);
+    ui.pdfPages.append(entry.sheet);
+    pdfPageVisibilityObserver.observe(entry.sheet);
+    pdfPageRenderObserver.observe(entry.sheet);
+  }
+  if (documentRef === state.document && documentRef === pdfPreviewDocumentRef) {
+    pdfCurrentPageNumber = 1;
+    updatePdfPageIndicator(1);
+  }
+}
+
+function renderPdfPreview() {
+  const documentRef = state.document;
+  const payload = documentRef?.previewPdfBase64;
+  if (typeof payload !== 'string' || !payload) {
+    disposePdfPreview();
+    return;
+  }
+
+  ui.pdfReader.hidden = false;
+  ui.readerFrame.classList.add('is-pdf-preview');
+  if (pdfPreviewDocumentRef === documentRef) {
+    void syncPdfFindingHighlights();
+    return;
+  }
+
+  disposePdfPreview();
+  pdfPreviewDocumentRef = documentRef;
+  pdfPreviewFailed = false;
+  ui.pdfReader.hidden = false;
+  ui.pdfReader.classList.remove('has-preview-error');
+  ui.textPanel.classList.add('is-pdf-preview');
+  ui.readerFrame.classList.add('is-pdf-preview');
+  ui.documentText.hidden = true;
+  ui.pdfPageLoading.hidden = false;
+  ui.pdfPageError.hidden = true;
+  ui.pdfPageStatus.textContent = 'Загрузка…';
+
+  try {
+    pdfLoadingTask = pdfjs.getDocument({
+      data: decodePdfBase64(payload),
+      isEvalSupported: false,
+    });
+    const loadingTask = pdfLoadingTask;
+    void loadingTask.promise.then(async (loadedDocument) => {
+      if (pdfPreviewDocumentRef !== documentRef) {
+        void loadedDocument.destroy();
+        return;
+      }
+      pdfDocumentProxy = loadedDocument;
+      pdfPageCount = loadedDocument.numPages;
+      updatePdfPageIndicator(1);
+      await createPdfPages(documentRef, loadedDocument);
+      if (documentRef === state.document && documentRef === pdfPreviewDocumentRef) {
+        void syncPdfFindingHighlights();
+      }
+    }).catch((error) => {
+      if (pdfPreviewDocumentRef === documentRef) showPdfPreviewError(error);
+    });
+  } catch (error) {
+    showPdfPreviewError(error);
+  }
+}
+
+async function jumpToPdfFinding(key) {
+  const documentRef = state.document;
+  if (!documentRef || documentRef !== pdfPreviewDocumentRef) return;
+
+  if (!pdfDocumentProxy && pdfLoadingTask) {
+    try {
+      await pdfLoadingTask.promise;
+    } catch {
+      return;
+    }
+  }
+  if (documentRef !== state.document || documentRef !== pdfPreviewDocumentRef || !pdfDocumentProxy) return;
+
+  const location = await locatePdfFinding(key);
+  if (!location || documentRef !== state.document || documentRef !== pdfPreviewDocumentRef) {
+    if (documentRef === state.document) ui.pdfPageStatus.textContent = 'Фрагмент не найден в оригинале';
+    return;
+  }
+
+  const entry = pdfPages.get(location.pageNumber);
+  if (!entry) return;
+  pdfCurrentPageNumber = location.pageNumber;
+  updatePdfPageIndicator(location.pageNumber);
+  entry.isNearViewport = true;
+  const scrollToPdfTarget = (element) => {
+    const host = ui.pdfPageHost;
+    const hostRect = host.getBoundingClientRect();
+    const targetRect = element.getBoundingClientRect();
+    host.scrollTo({
+      top: host.scrollTop + targetRect.top - hostRect.top - host.clientTop
+        - (host.clientHeight - targetRect.height) / 2,
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+    });
+  };
+  scrollToPdfTarget(entry.sheet);
+  const rendered = await renderPdfPage(location.pageNumber);
+  if (!rendered || documentRef !== state.document || documentRef !== pdfPreviewDocumentRef) return;
+  const target = renderPdfHighlight(key, location, entry);
+  if (target) {
+    scrollToPdfTarget(target);
+    target.focus({ preventScroll: true });
+  } else {
+    ui.pdfPageStatus.textContent = 'Страница найдена, фрагмент не удалось выделить';
+  }
+}
+
+const pdfVisiblePageRatios = new Map();
+const pdfPageVisibilityObserver = new IntersectionObserver((records) => {
+  for (const record of records) {
+    const pageNumber = Number(record.target.dataset.pageNumber);
+    if (record.isIntersecting) pdfVisiblePageRatios.set(pageNumber, record.intersectionRatio);
+    else pdfVisiblePageRatios.delete(pageNumber);
+  }
+  let currentPage = 0;
+  let currentRatio = 0;
+  for (const [pageNumber, ratio] of pdfVisiblePageRatios) {
+    if (ratio > currentRatio) {
+      currentPage = pageNumber;
+      currentRatio = ratio;
+    }
+  }
+  if (currentPage && !pdfPreviewFailed) {
+    pdfCurrentPageNumber = currentPage;
+    updatePdfPageIndicator(currentPage);
+  }
+}, { root: ui.pdfPageHost, threshold: [0, 0.25, 0.5, 0.75, 1] });
+
+const pdfPageRenderObserver = new IntersectionObserver((records) => {
+  for (const record of records) {
+    const pageNumber = Number(record.target.dataset.pageNumber);
+    const entry = pdfPages.get(pageNumber);
+    if (!entry) continue;
+    entry.isNearViewport = record.isIntersecting;
+    if (record.isIntersecting) void renderPdfPage(pageNumber);
+    else if (entry.rendered || entry.renderPromise) releasePdfPage(entry);
+  }
+}, { root: ui.pdfPageHost, rootMargin: '1100px 0px', threshold: 0 });
+
+let pdfObservedHostWidth = 0;
+const pdfPageResizeObserver = new ResizeObserver(() => {
+  if (!pdfDocumentProxy || ui.pdfReader.hidden) return;
+  const hostWidth = Math.max(1, ui.pdfPageHost.clientWidth);
+  if (Math.abs(hostWidth - pdfObservedHostWidth) < 8) return;
+  pdfObservedHostWidth = hostWidth;
+  for (const entry of pdfPages.values()) {
+    const renderedOrRendering = entry.rendered || entry.renderPromise;
+    if (renderedOrRendering) releasePdfPage(entry);
+    updatePdfPageSize(entry, hostWidth);
+    pdfPageVisibilityObserver.unobserve(entry.sheet);
+    pdfPageRenderObserver.unobserve(entry.sheet);
+    pdfPageVisibilityObserver.observe(entry.sheet);
+    pdfPageRenderObserver.observe(entry.sheet);
+  }
+});
+pdfPageResizeObserver.observe(ui.pdfPageHost);
+
 function renderControls() {
   const busy = state.sourceLoading || state.analysis === 'running';
   ui.openUrlDialog.disabled = busy;
@@ -1090,6 +1816,8 @@ function renderDocument() {
   ui.analysisScreen.hidden = state.screen !== 'analysis';
 
   if (!doc || state.screen !== 'analysis') {
+    disposePdfPreview();
+    ui.previewNotice.hidden = true;
     sourceMarks = [];
     sourceTargets.clear();
     ui.readerFrame.classList.remove('is-page-preview');
@@ -1101,17 +1829,23 @@ function renderDocument() {
 
   ui.documentTitle.textContent = doc.title || 'Документ без названия';
   ui.documentFormat.textContent = String(doc.format || 'ТЕКСТ').toUpperCase();
-  const hasPage = Boolean(doc.url);
+  ui.previewNotice.textContent = typeof doc.previewNotice === 'string' ? doc.previewNotice : '';
+  ui.previewNotice.hidden = !ui.previewNotice.textContent;
+  const hasPage = Boolean(doc.previewHtml);
   ui.readerFrame.classList.toggle('is-page-preview', hasPage);
+  ui.textPanel.classList.toggle('is-pdf-preview', Boolean(doc.previewPdfBase64) && !pdfPreviewFailed);
   ui.pagePanel.hidden = !hasPage;
   ui.textPanel.hidden = hasPage;
   if (hasPage) {
+    disposePdfPreview();
     sourceMarks = [];
     sourceTargets.clear();
     renderPageFrame(doc.url);
   } else {
     clearPageFrame();
     renderSourceText();
+    ui.documentText.hidden = Boolean(doc.previewPdfBase64) && !pdfPreviewFailed;
+    renderPdfPreview();
   }
 }
 
@@ -2175,10 +2909,219 @@ function redactProviderSecret(message, secret = '') {
   return secret ? text.split(secret).join('[скрыт]') : text;
 }
 
+function normanQuotaPercent(quota) {
+  const value = Number(quota?.percentRemaining);
+  if (Number.isFinite(value)) return Math.round(Math.min(100, Math.max(0, value)));
+  const limit = Number(quota?.limit);
+  const remaining = Number(quota?.remaining);
+  return Number.isFinite(limit) && limit > 0 && Number.isFinite(remaining)
+    ? Math.round(Math.min(100, Math.max(0, remaining / limit * 100)))
+    : null;
+}
+
+function normanQuotaResetLabel(quota) {
+  if (typeof quota?.resetsAt !== 'string' || !quota.resetsAt) return '';
+  const date = new Date(quota.resetsAt);
+  return Number.isNaN(date.getTime())
+    ? quota.resetsAt
+    : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+}
+
+function normanQuotaSummary(quota) {
+  if (!quota) return '';
+  const percent = normanQuotaPercent(quota);
+  return `Осталось ${quota.remaining} из ${quota.limit} запросов${percent === null ? '' : ` (${percent}%)`}`;
+}
+
+function renderNormanStatus() {
+  const hasSession = normanStatus.authenticated && Boolean(normanStatus.user);
+  const message = normanStatus.checking
+    ? 'Проверяем сессию Norman…'
+    : normanStatus.message || (hasSession ? 'Подключено к Norman.' : 'Войдите в аккаунт Norman.');
+  const stateName = normanStatus.checking ? 'loading'
+    : normanStatus.error ? 'error'
+      : normanStatus.messageState || (hasSession ? 'ready' : 'idle');
+
+  ui.normanOptions.hidden = codexSettings.provider !== 'norman';
+  ui.normanStatus.textContent = hasSession && !normanStatus.error
+    ? `${normanStatus.user.email} · ${normanQuotaSummary(normanStatus.quota)}`
+    : message;
+  ui.normanStatus.dataset.state = stateName;
+  ui.normanSignedOut.hidden = hasSession;
+  ui.normanSignedIn.hidden = !hasSession;
+  ui.normanAccountEmail.textContent = hasSession ? normanStatus.user.email : '';
+  const resetLabel = normanQuotaResetLabel(normanStatus.quota);
+  ui.normanAccountQuota.textContent = hasSession
+    ? `${normanQuotaSummary(normanStatus.quota)}${resetLabel ? ` · Обновление ${resetLabel}` : ''}`
+    : '';
+  ui.normanAccountStatus.textContent = message;
+  ui.normanAccountStatus.dataset.state = stateName;
+  for (const control of [
+    ui.normanServerUrl,
+    ui.normanEmail,
+    ui.normanPassword,
+    ui.normanCode,
+    ui.normanLogin,
+    ui.normanRegister,
+    ui.normanVerify,
+    ui.normanLogout,
+    ui.checkNormanStatus,
+  ]) {
+    control.disabled = normanStatus.checking || !isTauri;
+  }
+  renderHeaderAiStatus();
+}
+
+async function refreshNormanStatus() {
+  if (normanStatusRequest) return normanStatusRequest;
+  if (!isTauri) {
+    normanStatus = {
+      checked: true,
+      authenticated: false,
+      user: null,
+      quota: null,
+      checking: false,
+      error: false,
+      message: 'Аккаунт Norman доступен в настольном приложении.',
+      messageState: 'idle',
+    };
+    renderNormanStatus();
+    return normanStatus;
+  }
+
+  normanStatus = { ...normanStatus, checking: true, error: false, messageState: 'loading' };
+  renderNormanStatus();
+  normanStatusRequest = (async () => {
+    try {
+      const result = await invoke('norman_me', { serverUrl: codexSettings.normanServerUrl });
+      normanStatus = result?.user
+        ? {
+          checked: true,
+          authenticated: true,
+          user: result.user,
+          quota: result.quota,
+          checking: false,
+          error: false,
+          message: `Подключено к ${result.user.email}.`,
+          messageState: 'ready',
+        }
+        : {
+          checked: true,
+          authenticated: false,
+          user: null,
+          quota: null,
+          checking: false,
+          error: false,
+          message: 'Войдите в аккаунт Norman.',
+          messageState: 'idle',
+        };
+    } catch (error) {
+      const detail = messageFrom(error);
+      const expired = /сессия norman истекла/i.test(detail);
+      normanStatus = {
+        ...normanStatus,
+        checked: true,
+        authenticated: expired ? false : normanStatus.authenticated,
+        user: expired ? null : normanStatus.user,
+        quota: expired ? null : normanStatus.quota,
+        checking: false,
+        error: true,
+        message: detail,
+        messageState: 'error',
+      };
+    }
+    renderNormanStatus();
+    return normanStatus;
+  })().finally(() => {
+    normanStatusRequest = null;
+  });
+  return normanStatusRequest;
+}
+
+async function runNormanAccountAction(action) {
+  if (!isTauri) {
+    normanStatus = { ...normanStatus, error: true, message: 'Аккаунт Norman доступен в настольном приложении.', messageState: 'error' };
+    renderNormanStatus();
+    return;
+  }
+  const serverUrl = ui.normanServerUrl.value.trim() || DEFAULT_CODEX_SETTINGS.normanServerUrl;
+  codexSettings.normanServerUrl = serverUrl;
+  saveCodexSettings();
+  const email = ui.normanEmail.value.trim();
+  const password = ui.normanPassword.value;
+  const code = ui.normanCode.value.trim();
+  const command = action === 'register' ? 'norman_register'
+    : action === 'verify' ? 'norman_verify' : 'norman_login';
+  normanStatus = { ...normanStatus, checking: true, error: false, message: 'Подключаемся к серверу Norman…', messageState: 'loading' };
+  renderNormanStatus();
+  try {
+    const args = { serverUrl, email };
+    if (action === 'register' || action === 'login') args.password = password;
+    if (action === 'verify') args.code = code;
+    const result = await invoke(command, args);
+    if (action === 'register') {
+      if (typeof result === 'string' && result) ui.normanCode.value = result;
+      normanStatus = {
+        ...normanStatus,
+        checked: true,
+        checking: false,
+        message: typeof result === 'string' && result
+          ? `Регистрация начата. Код для разработки: ${result}`
+          : `Код подтверждения отправлен на ${email}.`,
+        messageState: 'success',
+      };
+    } else {
+      ui.normanEmail.value = result.user.email;
+      ui.normanPassword.value = '';
+      ui.normanCode.value = '';
+      normanStatus = {
+        checked: true,
+        authenticated: true,
+        user: result.user,
+        quota: result.quota,
+        checking: false,
+        error: false,
+        message: action === 'verify' ? 'Email подтверждён.' : 'Вход выполнен.',
+        messageState: 'success',
+      };
+    }
+  } catch (error) {
+    normanStatus = { ...normanStatus, checked: true, checking: false, error: true, message: messageFrom(error), messageState: 'error' };
+  } finally {
+    ui.normanPassword.value = '';
+    renderNormanStatus();
+  }
+  if (normanStatus.authenticated) void refreshNormanStatus();
+}
+
+async function logoutNorman() {
+  normanStatus = { ...normanStatus, checking: true, error: false, message: 'Завершаем сессию Norman…', messageState: 'loading' };
+  renderNormanStatus();
+  let logoutError = '';
+  try {
+    if (!isTauri) throw new Error('Аккаунт Norman доступен в настольном приложении.');
+    await invoke('norman_logout');
+  } catch (error) {
+    logoutError = messageFrom(error);
+  }
+  normanStatus = {
+    checked: true,
+    authenticated: false,
+    user: null,
+    quota: null,
+    checking: false,
+    error: Boolean(logoutError),
+    message: logoutError ? `Сессия завершена на этом устройстве. Сервер не подтвердил выход: ${logoutError}` : 'Вы вышли из аккаунта Norman.',
+    messageState: logoutError ? 'error' : 'success',
+  };
+  renderNormanStatus();
+}
+
 function refreshSelectedAiProviderStatus() {
   if (codexSettings.provider === 'ollama') return refreshOllamaStatus();
   if (codexSettings.provider === 'cloudru') return refreshCloudRuStatus();
   if (codexSettings.provider === 'yandex') return refreshYandexStatus();
+  if (codexSettings.provider === 'norman') return refreshNormanStatus();
   if (codexSettings.provider === 'claude') return refreshClaudeStatus();
   return refreshCodexStatus();
 }
@@ -3403,6 +4346,7 @@ function aiProviderLabel(provider) {
     case 'claude': return 'Claude Code';
     case 'cloudru': return 'Cloud.ru';
     case 'yandex': return 'Yandex AI Studio';
+    case 'norman': return 'Норман';
     default: return 'ChatGPT (Codex)';
   }
 }
@@ -3848,7 +4792,8 @@ async function executeAiReview(tab, token, parallelProcesses) {
     ? await refreshOllamaStatus()
     : provider === 'cloudru' ? await refreshCloudRuStatus()
       : provider === 'yandex' ? await refreshYandexStatus()
-        : provider === 'claude' ? await refreshClaudeStatus() : await refreshCodexStatus();
+        : provider === 'norman' ? await refreshNormanStatus()
+          : provider === 'claude' ? await refreshClaudeStatus() : await refreshCodexStatus();
   if (tabById(tab.id) !== tab || token !== tab.analysisToken) return;
   if (!codexSettings.enabled) {
     tab.aiAnalysis = 'idle';
@@ -3868,25 +4813,37 @@ async function executeAiReview(tab, token, parallelProcesses) {
   const yandexAvailable = status?.checked === true
     && status.available === true
     && status.models.includes(codexSettings.yandexModel);
+  const normanAvailable = isTauri
+    && status?.checked === true
+    && status.authenticated === true
+    && status.error !== true
+    && Number(status.quota?.remaining) > 0;
   if ((provider === 'codex' && !codexAvailable)
     || (provider === 'claude' && !claudeAvailable)
     || (provider === 'ollama' && !ollamaAvailable)
     || (provider === 'cloudru' && !cloudRuAvailable)
-    || (provider === 'yandex' && !yandexAvailable)) {
+    || (provider === 'yandex' && !yandexAvailable)
+    || (provider === 'norman' && !normanAvailable)) {
     tab.aiAnalysis = 'unavailable';
-    tab.aiAnalysisMessage = status.message || (provider === 'ollama'
-      ? 'Выберите установленную модель Ollama. Локальные результаты сохранены.'
-      : provider === 'cloudru'
-        ? 'Проверьте API-ключ и модель Cloud.ru. Локальные результаты сохранены.'
-        : provider === 'yandex'
-          ? 'Проверьте API-ключ, ID каталога и модель Yandex AI Studio. Локальные результаты сохранены.'
-          : provider === 'claude'
-            ? !status.installed
-              ? 'Claude Code CLI не найден. Локальные результаты сохранены.'
-              : 'Войдите в Claude Code CLI. Локальные результаты сохранены.'
-          : !status.installed
-            ? 'Codex CLI не найден. Локальные результаты сохранены.'
-            : 'Войдите в Codex CLI. Локальные результаты сохранены.');
+    tab.aiAnalysisMessage = provider === 'norman'
+      ? status.error || !status.authenticated
+        ? status.message || 'Войдите в аккаунт Norman в настройках. Локальные результаты сохранены.'
+        : Number(status.quota?.remaining) <= 0
+          ? 'Квота Norman исчерпана. Локальные результаты сохранены.'
+          : status.message || 'Проверьте подключение к серверу Norman. Локальные результаты сохранены.'
+      : status.message || (provider === 'ollama'
+        ? 'Выберите установленную модель Ollama. Локальные результаты сохранены.'
+        : provider === 'cloudru'
+          ? 'Проверьте API-ключ и модель Cloud.ru. Локальные результаты сохранены.'
+          : provider === 'yandex'
+            ? 'Проверьте API-ключ, ID каталога и модель Yandex AI Studio. Локальные результаты сохранены.'
+            : provider === 'claude'
+              ? !status.installed
+                ? 'Claude Code CLI не найден. Локальные результаты сохранены.'
+                : 'Войдите в Claude Code CLI. Локальные результаты сохранены.'
+              : !status.installed
+                ? 'Codex CLI не найден. Локальные результаты сохранены.'
+                : 'Войдите в Codex CLI. Локальные результаты сохранены.');
     return;
   }
 
@@ -3908,7 +4865,14 @@ async function executeAiReview(tab, token, parallelProcesses) {
   const unlisten = [];
   try {
     let result;
-    const input = provider === 'ollama'
+    const input = provider === 'norman'
+      ? {
+        serverUrl: codexSettings.normanServerUrl,
+        text: tab.document.text,
+        findings: tab.findings,
+        parallelProcesses,
+      }
+      : provider === 'ollama'
       ? {
         baseUrl: codexSettings.ollamaBaseUrl.trim() || null,
         text: tab.document.text,
@@ -3968,7 +4932,8 @@ async function executeAiReview(tab, token, parallelProcesses) {
       const command = provider === 'ollama' ? 'analyze_with_ollama'
         : provider === 'cloudru' ? 'analyze_with_cloudru'
           : provider === 'yandex' ? 'analyze_with_yandex'
-            : provider === 'claude' ? 'analyze_with_claude' : 'analyze_with_codex';
+            : provider === 'norman' ? 'analyze_with_norman'
+              : provider === 'claude' ? 'analyze_with_claude' : 'analyze_with_codex';
       result = await invoke(command, input);
     } else {
       if (provider === 'codex') {
@@ -4025,6 +4990,7 @@ async function executeAiReview(tab, token, parallelProcesses) {
   } finally {
     if (tab.aiReviewAbortController === requestController) tab.aiReviewAbortController = null;
     for (const stop of unlisten) stop();
+    if (provider === 'norman') await refreshNormanStatus();
   }
 }
 
@@ -4241,6 +5207,8 @@ async function receiveDocument(load) {
       format: doc.format || 'ТЕКСТ',
       text: doc.text,
       previewHtml: typeof doc.previewHtml === 'string' ? doc.previewHtml : (typeof doc.html === 'string' ? doc.html : ''),
+      previewPdfBase64: typeof doc.previewPdfBase64 === 'string' ? doc.previewPdfBase64 : '',
+      previewNotice: typeof doc.previewNotice === 'string' ? doc.previewNotice : '',
     };
     const tab = createDocumentTab(documentData);
     state.tabs.push(tab);
@@ -4456,8 +5424,28 @@ ui.openSettings.addEventListener('click', () => showSettingsDialog());
 ui.headerAiStatus.addEventListener('click', () => {
   showSettingsDialog({
     aiOnly: true,
-    focusTarget: codexSettings.enabled ? ui.codexProvider : ui.codexEnabled,
+    focusTarget: codexSettings.enabled
+      ? (ui.codexProvider.parentElement.querySelector('.custom-select-trigger') || ui.codexEnabled)
+      : ui.codexEnabled,
   });
+});
+ui.settingsTabs.addEventListener('click', (event) => {
+  const tab = event.target.closest('[data-settings-tab]');
+  if (tab) setSettingsTab(tab.dataset.settingsTab);
+});
+ui.settingsTabs.addEventListener('keydown', (event) => {
+  const current = event.target.closest('[data-settings-tab]');
+  if (!current) return;
+  const tabs = ui.settingsTabButtons;
+  const index = tabs.indexOf(current);
+  let nextIndex = index;
+  if (event.key === 'ArrowDown' || event.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length;
+  else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') nextIndex = (index + tabs.length - 1) % tabs.length;
+  else if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = tabs.length - 1;
+  else return;
+  event.preventDefault();
+  setSettingsTab(tabs[nextIndex].dataset.settingsTab, { focus: true });
 });
 ui.openOllamaSetup.addEventListener('click', async () => {
   ui.settingsDialog.close();
@@ -4479,8 +5467,7 @@ ui.welcomeDialog.addEventListener('click', (event) => {
 ui.closeSettings.addEventListener('click', () => ui.settingsDialog.close());
 ui.settingsDialog.addEventListener('close', () => {
   if (ui.settingsDialog.open) return;
-  ui.settingsDialog.classList.remove('ai-only');
-  ui.settingsTitle.textContent = 'Настройки';
+  ui.normanPassword.value = '';
 });
 ui.closeAiReview.addEventListener('click', () => ui.aiReviewDialog.close());
 ui.aiReviewDialog.addEventListener('close', () => {
@@ -4520,6 +5507,26 @@ ui.ollamaSetupModel.addEventListener('change', () => {
 });
 ui.checkCloudRuStatus.addEventListener('click', () => void refreshCloudRuStatus());
 ui.checkYandexStatus.addEventListener('click', () => void refreshYandexStatus());
+ui.checkNormanStatus.addEventListener('click', () => void refreshNormanStatus());
+ui.manageNormanAccount.addEventListener('click', () => setSettingsTab('account'));
+ui.normanLogin.addEventListener('click', () => void runNormanAccountAction('login'));
+ui.normanRegister.addEventListener('click', () => void runNormanAccountAction('register'));
+ui.normanVerify.addEventListener('click', () => void runNormanAccountAction('verify'));
+ui.normanLogout.addEventListener('click', () => void logoutNorman());
+for (const input of [ui.normanEmail, ui.normanPassword]) {
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void runNormanAccountAction('login');
+    }
+  });
+}
+ui.normanCode.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    void runNormanAccountAction('verify');
+  }
+});
 ui.cloudRuApiKey.addEventListener('input', () => {
   cloudRuApiKey = ui.cloudRuApiKey.value;
   cloudRuStatusRequestId += 1;
@@ -4544,12 +5551,17 @@ ui.settingsDialog.addEventListener('change', (event) => {
     render();
   }
   if (event.target === ui.codexEnabled) {
+    if (ui.codexEnabled.checked && !providerPreferenceSaved) {
+      codexSettings.provider = 'norman';
+      providerPreferenceSaved = true;
+    }
     codexSettings.enabled = ui.codexEnabled.checked;
     syncCodexSettingsUI();
     render();
   }
   if (event.target === ui.codexProvider) {
-    codexSettings.provider = ['claude', 'ollama', 'cloudru', 'yandex'].includes(ui.codexProvider.value) ? ui.codexProvider.value : 'codex';
+    codexSettings.provider = ['codex', 'claude', 'ollama', 'cloudru', 'yandex', 'norman'].includes(ui.codexProvider.value) ? ui.codexProvider.value : 'codex';
+    providerPreferenceSaved = true;
     saveCodexSettings();
     syncCodexSettingsUI();
     if (codexSettings.provider === 'ollama') void prepareOllamaSettings();
@@ -4575,6 +5587,13 @@ ui.settingsDialog.addEventListener('change', (event) => {
     if (codexSettings.enabled && codexSettings.provider === 'yandex') void refreshYandexStatus();
   }
   if (event.target === ui.yandexModel) codexSettings.yandexModel = ui.yandexModel.value;
+  if (event.target === ui.normanServerUrl) {
+    codexSettings.normanServerUrl = ui.normanServerUrl.value.trim() || DEFAULT_CODEX_SETTINGS.normanServerUrl;
+    ui.normanServerUrl.value = codexSettings.normanServerUrl;
+    saveCodexSettings();
+    renderAiProviderConsent();
+    if (codexSettings.provider === 'norman') void refreshNormanStatus();
+  }
   if (event.target === ui.codexModel) codexSettings.model = ui.codexModel.value;
   if (event.target === ui.claudeModel) codexSettings.claudeModel = ui.claudeModel.value;
   if (event.target === ui.claudeReasoning) {
@@ -4589,7 +5608,7 @@ ui.settingsDialog.addEventListener('change', (event) => {
     const selected = Number(ui.parallelProcesses.value);
     codexSettings.parallelProcesses = [1, 2, 3, 4].includes(selected) ? selected : 1;
   }
-  if ([ui.codexEnabled, ui.codexProvider, ui.ollamaBaseUrl, ui.ollamaModel, ui.cloudRuModel, ui.yandexModel, ui.codexModel, ui.codexReasoning, ui.claudeModel, ui.claudeReasoning, ui.parallelProcesses].includes(event.target)) {
+  if ([ui.codexEnabled, ui.codexProvider, ui.ollamaBaseUrl, ui.ollamaModel, ui.cloudRuModel, ui.yandexModel, ui.normanServerUrl, ui.codexModel, ui.codexReasoning, ui.claudeModel, ui.claudeReasoning, ui.parallelProcesses].includes(event.target)) {
     saveCodexSettings();
   }
   if (event.target === ui.codexEnabled && codexSettings.enabled) {
@@ -4644,20 +5663,15 @@ ui.findingList.parentElement.addEventListener('click', (event) => {
   }
   const button = event.target.closest('[data-finding-id]');
   if (!button) return;
-  state.selectedId = state.selectedId === button.dataset.findingId ? null : button.dataset.findingId;
-  render();
-  if (state.selectedId) {
-    keepExpandedFindingVisible(state.selectedId);
-    if (state.document?.url) scrollPageFindingIntoView(state.selectedId);
-    else {
-      const target = sourceTargets.get(state.selectedId);
-      if (target) {
-        target.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
-        target.focus({ preventScroll: true });
-      }
-    }
+  const key = button.dataset.findingId;
+  if (state.selectedId === key) {
+    state.selectedId = null;
+    updatePdfHighlightSelection();
+    render();
+    keepFindingVisible(followedFindingId);
+    return;
   }
-  if (!state.selectedId) keepFindingVisible(followedFindingId);
+  selectFinding(key);
 });
 
 ui.documentText.addEventListener('click', (event) => {
@@ -4672,6 +5686,11 @@ ui.documentText.addEventListener('click', (event) => {
 });
 
 ui.textPanel.addEventListener('scroll', scheduleFindingToSourceScroll, { passive: true });
+
+ui.pdfPages.addEventListener('click', (event) => {
+  const hit = event.target.closest('.pdf-source-hit');
+  if (hit?.dataset.findingId) selectFinding(hit.dataset.findingId);
+});
 
 ui.retryAnalysis.addEventListener('click', () => runAnalysis());
 ui.retryAiAnalysis.addEventListener('click', () => { void retryAiAnalysis(); });

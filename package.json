@@ -15,6 +15,7 @@
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "@tauri-apps/plugin-opener": "^2.0.0",
+    "pdfjs-dist": "^4.10.38",
     "pdfmake": "^0.2.20"
   },
   "devDependencies": {

@@ -37,6 +37,7 @@
           </div>
           <button class="header-ai-status" id="headerAiStatus" type="button" aria-label="Открыть настройки ИИ" title="Открыть настройки ИИ" aria-haspopup="dialog" aria-controls="settingsDialog" hidden>
             <span id="headerAiProviderIcon"></span>
+            <span class="header-ai-quota" id="headerAiQuota" hidden></span>
             <span class="header-ai-reasoning" id="headerAiReasoning" hidden></span>
           </button>
           <button class="app-info-button" id="openAppInfo" type="button" aria-label="О программе" title="О программе">
@@ -159,6 +160,14 @@
             <h2 id="settingsTitle">Настройки</h2>
             <button class="modal-close" id="closeSettings" type="button" aria-label="Закрыть"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg></button>
           </div>
+          <div class="settings-layout">
+            <nav class="settings-tabs" id="settingsTabs" role="tablist" aria-label="Категории настроек" aria-orientation="vertical">
+              <button class="settings-tab" id="settingsTabGeneral" type="button" role="tab" aria-selected="true" aria-controls="settingsGeneral" tabindex="0" data-settings-tab="general">Основные</button>
+              <button class="settings-tab" id="settingsTabAi" type="button" role="tab" aria-selected="false" aria-controls="settingsAi" tabindex="-1" data-settings-tab="ai">ИИ</button>
+              <button class="settings-tab" id="settingsTabAccount" type="button" role="tab" aria-selected="false" aria-controls="settingsAccount" tabindex="-1" data-settings-tab="account">Аккаунт</button>
+            </nav>
+            <div class="settings-panels">
+              <section class="settings-panel" id="settingsGeneral" role="tabpanel" aria-labelledby="settingsTabGeneral" tabindex="0">
           <fieldset class="settings-group settings-theme">
             <legend>Цветовая тема</legend>
             <div class="settings-modal-options">
@@ -196,13 +205,15 @@
             </label>
             <p class="preview-note">Встроенный фильтр скрывает очевидные рекламные блоки. Расширение uBlock Origin в этом превью недоступно.</p>
           </section>
+              </section>
+              <section class="settings-panel" id="settingsAi" role="tabpanel" aria-labelledby="settingsTabAi" tabindex="0" hidden>
           <section class="settings-group settings-codex" id="aiSettingsGroup" aria-labelledby="codexSettingsTitle">
             <h3 id="codexSettingsTitle">Проверка с помощью ИИ</h3>
             <label class="codex-opt-in">
               <input id="codexEnabled" type="checkbox" />
               <span>Добавлять проверку с помощью ИИ после локального анализа</span>
             </label>
-            <p class="codex-description">При включении текст документа и найденные сигналы будут передаваться выбранному провайдеру.</p>
+            <p class="codex-description" id="codexDescription">При включении текст документа и найденные сигналы передаются только выбранному провайдеру.</p>
             <div class="codex-options" id="codexOptions" hidden>
               <div class="codex-field">
                 <span>Провайдер</span>
@@ -212,6 +223,7 @@
                   <option value="ollama">Ollama</option>
                   <option value="cloudru" data-badge="Бета">Cloud.ru Foundation Models</option>
                   <option value="yandex" data-badge="Бета">Yandex AI Studio</option>
+                  <option value="norman">Норман</option>
                 </select>
               </div>
               <div class="codex-provider-options" id="codexProviderOptions">
@@ -246,6 +258,7 @@
                 </div>
               </div>
               <div class="codex-provider-options" id="claudeOptions" hidden>
+                <p class="codex-privacy-note">Claude Code сохраняет сессии локально, чтобы продолжить запрос после сбоя.</p>
                 <div class="codex-field">
                   <span>Модель Claude</span>
                   <div class="ai-provider-model-control">
@@ -274,29 +287,6 @@
                 </div>
                 <div class="codex-status-row">
                   <p id="claudeStatus" role="status" aria-live="polite">Статус Claude Code ещё не проверен.</p>
-                </div>
-              </div>
-              <div class="codex-provider-options" id="claudeOptions" hidden>
-                <p class="codex-privacy-note">Claude Code сохраняет сессии локально, чтобы продолжить запрос после сбоя.</p>
-                <div class="codex-field">
-                  <span>Модель Claude</span>
-                  <select class="modal-input codex-select" id="claudeModel">
-                    <option value="sonnet">Sonnet</option>
-                    <option value="opus">Opus</option>
-                    <option value="haiku">Haiku</option>
-                  </select>
-                </div>
-                <div class="codex-field">
-                  <span>Уровень рассуждения</span>
-                  <select class="modal-input codex-select" id="claudeReasoning">
-                    <option value="low">Низкое</option>
-                    <option value="medium">Среднее</option>
-                    <option value="high">Высокое</option>
-                  </select>
-                </div>
-                <div class="codex-status-row">
-                  <p id="claudeStatus" role="status" aria-live="polite">Статус Claude Code ещё не проверен.</p>
-                  <button class="button button-secondary" id="checkClaudeStatus" type="button">Проверить</button>
                 </div>
               </div>
               <div class="codex-provider-options" id="ollamaOptions" hidden>
@@ -391,8 +381,54 @@
                   <p id="yandexStatus" role="status" aria-live="polite">Введите API-ключ и ID каталога, затем проверьте подключение.</p>
                 </div>
               </div>
+              <div class="codex-provider-options" id="normanOptions" hidden>
+                <p class="codex-privacy-note">Текст документа и сигналы передаются только на выбранный сервер Norman. Настройте адрес и войдите во вкладке «Аккаунт».</p>
+                <div class="codex-status-row">
+                  <p id="normanStatus" role="status" aria-live="polite">Войдите в аккаунт Norman.</p>
+                  <button class="button button-secondary" id="manageNormanAccount" type="button">Аккаунт</button>
+                </div>
+              </div>
             </div>
           </section>
+              </section>
+              <section class="settings-panel settings-account-panel" id="settingsAccount" role="tabpanel" aria-labelledby="settingsTabAccount" tabindex="0" hidden>
+                <section class="settings-group" aria-labelledby="normanAccountTitle">
+                  <h3 id="normanAccountTitle">Аккаунт Нормана</h3>
+                  <label class="codex-field codex-field-text" for="normanServerUrl">
+                    <span>Адрес сервера</span>
+                    <input class="modal-input codex-select" id="normanServerUrl" type="url" inputmode="url" autocomplete="url" value="https://norman.inne.space" />
+                  </label>
+                  <p class="codex-privacy-note">По умолчанию используется сервер Norman. Для локальной разработки укажите http://127.0.0.1:8787; удалённым адресам требуется HTTPS.</p>
+                  <button class="button button-secondary" id="checkNormanStatus" type="button">Проверить сессию</button>
+                  <div class="norman-account-state" id="normanSignedOut">
+                    <label class="codex-field codex-field-text" for="normanEmail">
+                      <span>Email</span>
+                      <input class="modal-input codex-select" id="normanEmail" type="email" autocomplete="email" />
+                    </label>
+                    <label class="codex-field codex-field-text" for="normanPassword">
+                      <span>Пароль</span>
+                      <input class="modal-input codex-select" id="normanPassword" type="password" autocomplete="current-password" />
+                    </label>
+                    <div class="norman-account-actions">
+                      <button class="button button-primary" id="normanLogin" type="button">Войти</button>
+                      <button class="button button-secondary" id="normanRegister" type="button">Создать аккаунт</button>
+                    </div>
+                    <label class="codex-field codex-field-text" for="normanCode">
+                      <span>Код подтверждения email</span>
+                      <input class="modal-input codex-select" id="normanCode" type="text" autocomplete="one-time-code" inputmode="numeric" />
+                    </label>
+                    <button class="button button-secondary" id="normanVerify" type="button">Подтвердить email</button>
+                  </div>
+                  <div class="norman-account-state" id="normanSignedIn" hidden>
+                    <p class="norman-account-email" id="normanAccountEmail"></p>
+                    <p class="norman-account-quota" id="normanAccountQuota"></p>
+                    <button class="button button-secondary" id="normanLogout" type="button">Выйти</button>
+                  </div>
+                  <p class="norman-account-status" id="normanAccountStatus" role="status" aria-live="polite" data-state="idle">Войдите в аккаунт или создайте новый.</p>
+                </section>
+              </section>
+            </div>
+          </div>
         </div>
       </dialog>
 
@@ -502,6 +538,15 @@
                     <span class="format-tag" id="documentFormat"></span>
                   </div>
                   <h2 class="document-title" id="documentTitle"></h2>
+                  <p class="preview-note" id="previewNotice" hidden></p>
+                  <section class="pdf-reader" id="pdfReader" aria-label="Предпросмотр документа" hidden>
+                    <div class="pdf-page-wrap" id="pdfPageHost">
+                      <p class="pdf-viewer-state" id="pdfPageLoading" role="status">Подготавливаем страницу…</p>
+                      <p class="pdf-viewer-state" id="pdfPageError" role="alert" hidden>Оригинал недоступен. Показан извлечённый текст ниже.</p>
+                      <div class="pdf-pages" id="pdfPages"></div>
+                    </div>
+                    <output class="pdf-page-status" id="pdfPageStatus" aria-label="Текущая страница" aria-live="polite"></output>
+                  </section>
                   <div class="document-text" id="documentText" tabindex="0" aria-label="Текст документа"></div>
                 </article>
               </section>

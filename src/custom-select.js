@@ -3,6 +3,7 @@ const PROVIDER_ICONS = {
   ollama: '/provider-logos/ollama.svg',
   cloudru: '/provider-logos/cloudru.svg',
   yandex: '/provider-logos/yandex.svg',
+  norman: '/provider-logos/norman.svg',
 };
 
 export function makeProviderIcon(value, className) {
